@@ -1,0 +1,15 @@
+[package]
+name = "message-derive"
+description = "#[derive(Message)] codegen: zero-copy readers / encode / descriptor registration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+message-core = { workspace = true }

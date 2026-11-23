@@ -1,0 +1,116 @@
+use message_core::{
+    plan_schema, FieldDescriptor, MessageDescriptor, SchemaSet, SimpleType, Type,
+};
+use message_gen::check_evolution;
+
+fn base_set() -> SchemaSet {
+    let mut set = SchemaSet {
+        messages: vec![MessageDescriptor::new(
+            1,
+            "User",
+            vec![
+                FieldDescriptor::new("id", SimpleType::U64.into()),
+                FieldDescriptor::new("name", SimpleType::String.into()),
+                FieldDescriptor::new("email", SimpleType::String.into()).optional().since(2),
+            ],
+        )],
+        enums: vec![],
+    };
+    plan_schema(&mut set).unwrap();
+    set
+}
+
+#[test]
+fn identical_sets_pass() {
+    assert!(check_evolution(&base_set(), &base_set()).is_empty());
+}
+
+#[test]
+fn appending_field_with_larger_since_passes() {
+    let mut set = base_set();
+    let mut grown = base_set();
+    grown.messages[0].fields.push(
+        FieldDescriptor::new("score", SimpleType::F64.into()).since(3),
+    );
+    plan_schema(&mut grown).unwrap();
+    let _ = &mut set;
+    assert!(check_evolution(&set, &grown).is_empty(), "legal appends must pass");
+}
+
+#[test]
+fn appending_base_field_is_rejected() {
+    let old = base_set();
+    let mut grown = base_set();
+    grown.messages[0]
+        .fields
+        .insert(1, FieldDescriptor::new("sneaky", SimpleType::U8.into()));
+    plan_schema(&mut grown).unwrap();
+    let errs = check_evolution(&old, &grown);
+    assert!(!errs.is_empty(), "inserting a base field must be rejected: {errs:?}");
+}
+
+#[test]
+fn new_field_with_small_since_is_rejected() {
+    let old = base_set();
+    let mut grown = base_set();
+    grown.messages[0]
+        .fields
+        .push(FieldDescriptor::new("late", SimpleType::U8.into()).since(2));
+    plan_schema(&mut grown).unwrap();
+    let errs = check_evolution(&old, &grown);
+    assert!(
+        errs.iter().any(|e| e.contains("since")),
+        "a new field with since=2 does not exceed the existing max version 2 and must be rejected: {errs:?}"
+    );
+}
+
+#[test]
+fn type_change_is_rejected() {
+    let old = base_set();
+    let mut changed = base_set();
+    changed.messages[0].fields[0].ty = Type::Simple(SimpleType::I64);
+    plan_schema(&mut changed).unwrap();
+    let errs = check_evolution(&old, &changed);
+    assert!(errs.iter().any(|e| e.contains("field definition changed")), "{errs:?}");
+}
+
+#[test]
+fn deletion_is_rejected() {
+    let old = base_set();
+    let mut shrunk = base_set();
+    shrunk.messages[0].fields.truncate(2);
+    plan_schema(&mut shrunk).unwrap();
+    let errs = check_evolution(&old, &shrunk);
+    assert!(errs.iter().any(|e| e.contains("field count shrank")), "{errs:?}");
+}
+
+#[test]
+fn message_removal_is_rejected() {
+    let old = base_set();
+    let mut empty = base_set();
+    empty.messages.clear();
+    let errs = check_evolution(&old, &empty);
+    assert!(errs.iter().any(|e| e.contains("was removed")), "{errs:?}");
+}
+
+#[test]
+fn enum_variant_change_is_rejected() {
+    let mut with_enum = base_set();
+    with_enum.enums.push(message_core::EnumDescriptor {
+        name: "Color".to_string(),
+        doc: None,
+        variants: vec![message_core::EnumVariant {
+            name: "Red".to_string(),
+            value: 0,
+            doc: None,
+        }],
+    });
+    let mut changed = with_enum.clone();
+    changed.enums[0].variants.push(message_core::EnumVariant {
+        name: "Blue".to_string(),
+        value: 1,
+        doc: None,
+    });
+    let errs = check_evolution(&with_enum, &changed);
+    assert!(errs.iter().any(|e| e.contains("variants changed")), "{errs:?}");
+}

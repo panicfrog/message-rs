@@ -1,0 +1,16 @@
+[package]
+name = "message-fixtures"
+description = "Test messages: roundtrip / planner cross-check / extension-block compatibility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+message-core = { workspace = true }
+message-derive = { path = "../message-derive" }
+message-gen = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "export-schema"
+path = "src/bin/export.rs"

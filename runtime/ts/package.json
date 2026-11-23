@@ -1,0 +1,17 @@
+{
+  "name": "@message/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "message-rs TypeScript 运行时(零依赖,RN(Hermes)/Web/Node 通用)",
+  "main": "src/runtime.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

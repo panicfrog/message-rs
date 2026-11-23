@@ -1,0 +1,15 @@
+[package]
+name = "playground"
+description = "Playground: define messages, run encode/decode, export code for every target"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+message-core = { workspace = true }
+message-derive = { path = "../message-derive" }
+message-gen = { workspace = true }
+
+[[bin]]
+name = "export-schema"
+path = "src/bin/export.rs"

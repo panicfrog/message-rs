@@ -1,0 +1,12 @@
+[package]
+name = "message-core"
+description = "IR data model, version-aware layout planner and wire-format constants (message-rs protocol core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+inventory = { workspace = true }
