@@ -37,7 +37,6 @@ dependencies = [
 name = "message-derive"
 version = "0.1.0"
 dependencies = [
- "message-core",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

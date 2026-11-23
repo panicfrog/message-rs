@@ -38,7 +38,7 @@ fn generate_ts_with_ir_decl(set: &SchemaSet, ir_decl: &str) -> String {
     );
     let _ = writeln!(
         out,
-        "import {{\n  readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,\n  readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,\n  findExtBlock, ScalarListView, StringListView, BytesListView, SlotListView,\n  StructListView, encodeMessage, type SchemaIr,\n}} from './runtime.js';\n"
+        "import {{\n  readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,\n  readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,\n  findExtBlock, ScalarListView, StringListView, BytesListView, SlotListView,\n  StructListView, encodeMessage, validateMessage, type SchemaIr, type ValidationError,\n}} from './runtime.js';\n"
     );
     let _ = writeln!(out, "{ir_decl}");
 
@@ -251,11 +251,20 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         "[{}]",
         ext_versions.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
     );
+    let ext_fixed = format!(
+        "{{ {} }}",
+        m.layout.ext_blocks
+            .iter()
+            .map(|b| format!("{}: {}", b.version, b.fixed_len))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     let _ = writeln!(out, "export class {name}Reader {{");
     let _ = writeln!(out, "  static readonly KEY = {};", m.key);
     let _ = writeln!(out, "  static readonly FIXED_LEN = {};", m.layout.fixed_len);
     let _ = writeln!(out, "  static readonly EXT_VERSIONS: readonly number[] = {ext_arr};");
+    let _ = writeln!(out, "  static readonly EXT_FIXED: Readonly<Record<number, number>> = {ext_fixed};");
     let _ = writeln!(
         out,
         "\n  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {{}}\n"
@@ -273,13 +282,17 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     );
 
     for f in &m.fields {
+        if f.reserved {
+            continue;
+        }
         let origin = if f.since > 1 { "__origin" } else { "this.origin" };
         let (ret, body) = field_read(f, origin, set);
         let ts_name = camel(&f.name);
         if f.since > 1 {
             let since = f.since;
-            let find =
-                format!("findExtBlock(this.dv, {name}Reader.EXT_VERSIONS, this.hv, {since})");
+            let find = format!(
+                "findExtBlock(this.dv, {name}Reader.EXT_VERSIONS, this.hv, {since}, {name}Reader.EXT_FIXED[{since}])"
+            );
             if f.optional {
                 let _ = writeln!(
                     out,
@@ -323,6 +336,9 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     // toUser(): Reader -> plain object (mirrors Rust's to_owned)
     let mut to_user_fields = String::new();
     for f in &m.fields {
+        if f.reserved {
+            continue;
+        }
         let c = camel(&f.name);
         let _ = writeln!(
             to_user_fields,
@@ -341,18 +357,24 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     // Plain-object interface + namespace
     let mut iface_fields = String::new();
     for f in &m.fields {
+        if f.reserved {
+            continue;
+        }
         let c = camel(&f.name);
         let t = ts_field_type(f, set);
         let _ = writeln!(iface_fields, "  {}: {};", c, t);
     }
     let _ = writeln!(
         out,
-        "export interface {name} {{\n{}}}\n\nexport namespace {name} {{\n  export function decode(buf: Uint8Array): {name}Reader | null {{\n    return {name}Reader.decode(buf);\n  }}\n  export function fromReader(r: {name}Reader): {name} {{\n    return r.toUser();\n  }}\n  export function fromBytes(buf: Uint8Array): {name} | null {{\n    const r = {name}Reader.decode(buf);\n    return r === null ? null : r.toUser();\n  }}\n  export function encode(value: {name}): Uint8Array {{\n    return encodeMessage(__MESSAGE_SCHEMA, '{name}', value as unknown as Record<string, unknown>);\n  }}\n}}\n",
+        "export interface {name} {{\n{}}}\n\nexport namespace {name} {{\n  export function decode(buf: Uint8Array): {name}Reader | null {{\n    return {name}Reader.decode(buf);\n  }}\n  export function fromReader(r: {name}Reader): {name} {{\n    return r.toUser();\n  }}\n  export function fromBytes(buf: Uint8Array): {name} | null {{\n    const r = {name}Reader.decode(buf);\n    return r === null ? null : r.toUser();\n  }}\n  /** Strictly check an untrusted buffer; after null no getter can throw. */\n  export function validate(buf: Uint8Array): ValidationError | null {{\n    return validateMessage(__MESSAGE_SCHEMA, '{name}', buf);\n  }}\n  export function encode(value: {name}): Uint8Array {{\n    return encodeMessage(__MESSAGE_SCHEMA, '{name}', value as unknown as Record<string, unknown>);\n  }}\n}}\n",
         iface_fields
     );
 
     // map views
     for f in &m.fields {
+        if f.reserved {
+            continue;
+        }
         if let Type::Map { body } = &f.ty {
             let view = format!("{}MapView", pascal(&f.name));
             let stride = f.element_size.unwrap_or(0);
@@ -499,6 +521,10 @@ fn materialize_field_expr(f: &FieldDescriptor, set: &SchemaSet, c: &str) -> Stri
                 Type::Struct { name } => {
                     format!("{name}.fromReader(this.{c}.value(i))")
                 }
+                Type::Array { body } => format!(
+                    "(() => {{ const mv = this.{c}.value(i); return {}; }})()",
+                    materialize_list("mv", &body.elem, set)
+                ),
                 _ => format!("this.{c}.value(i)"),
             };
             format!(

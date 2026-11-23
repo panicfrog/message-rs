@@ -66,9 +66,28 @@ fn export_vectors(out: &str) -> i32 {
         "hex": hex,
         "expected": expected,
     });
-    match std::fs::write(out, serde_json::to_string_pretty(&doc).unwrap()) {
+    let t = message_fixtures::sample_tally();
+    let tally = json!({
+        "key": 5u32,
+        "name": "Tally",
+        "hex": t.encode().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        // enum map keys are the numeric value as a string (the TS object shape)
+        "expected": {
+            "usage": { "0": 1u32, "2": 3u32 },
+            "labels": { "a": ["x", "y"], "b": [] },
+        },
+    });
+    let tally_out = std::path::Path::new(out).with_file_name("tally.json");
+    match serde_json::to_string_pretty(&doc)
+        .map_err(|e| e.to_string())
+        .and_then(|s| std::fs::write(out, s).map_err(|e| e.to_string()))
+        .and_then(|_| {
+            serde_json::to_string_pretty(&tally)
+                .map_err(|e| e.to_string())
+                .and_then(|s| std::fs::write(&tally_out, s).map_err(|e| e.to_string()))
+        }) {
         Ok(()) => {
-            println!("vectors written to {out}");
+            println!("vectors written to {out} and {}", tally_out.display());
             0
         }
         Err(e) => {

@@ -150,30 +150,35 @@ pub fn slot_slice<'a>(payload: &'a [u8], off: u32, len: u32) -> &'a [u8] {
 
 /// Locate the extension block of the target version by walking back from the payload end,
 /// returning its payload-relative range `[start, end)` (trailer excluded). `versions` lists all
-/// extension versions of this schema (ascending); `header_version` is the writer's maximum.
-/// Corrupt data yields None (accessors degrade to defaults; strict checking goes through
-/// validate).
-pub fn find_ext_block(payload: &[u8], versions: &[u16], header_version: u8, target: u16) -> Option<(usize, usize)> {
+/// extension versions this reader knows (ascending); `header_version` is the writer's maximum;
+/// `min_len` is the block's fixed region (bitmap + fixed fields), so a block too short to hold
+/// its fields is treated as absent. Blocks newer than the target are stepped over even when this
+/// reader does not know them (an older reader must still find its own blocks behind a newer
+/// writer's). Corrupt data yields None (accessors degrade to defaults; strict checking goes
+/// through validate).
+pub fn find_ext_block(payload: &[u8], versions: &[u16], header_version: u8, target: u16, min_len: usize) -> Option<(usize, usize)> {
+    let max_known = versions.last().copied().unwrap_or(0);
     let mut pos = payload.len();
-    for &v in versions.iter().rev() {
-        if v as u8 > header_version {
-            continue; // the writer does not include this version yet
-        }
+    loop {
         if pos < crate::EXT_TRAILER_LEN {
             return None;
         }
         let since = read_u16(payload, pos - 6);
         let block_len = read_u32(payload, pos - 4) as usize;
-        if since != v || block_len < crate::EXT_TRAILER_LEN || block_len > pos {
+        if since < 2 || since > header_version as u16 || block_len < crate::EXT_TRAILER_LEN || block_len > pos {
             return None;
         }
         let block_start = pos - block_len;
-        if v == target {
-            return Some((block_start, pos - 6));
+        if since == target {
+            let end = pos - crate::EXT_TRAILER_LEN;
+            return (end - block_start >= min_len).then_some((block_start, end));
         }
-        pos = block_start;
+        if since > target && (since > max_known || versions.contains(&since)) {
+            pos = block_start;
+            continue;
+        }
+        return None;
     }
-    None
 }
 
 // ---- Lazy views ----

@@ -71,12 +71,6 @@ pub fn expand_struct(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStrea
     // ---- Per-version blocks + optional bit indices ----
     let mut blocks: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
     for (i, s) in specs.iter().enumerate() {
-        if s.since < 1 {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!("field `{}` must have since >= 1", s.name),
-            ));
-        }
         blocks.entry(s.since).or_default().push(i);
     }
     let mut opt_bits: Vec<Option<usize>> = vec![None; specs.len()];
@@ -195,6 +189,9 @@ pub fn expand_struct(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStrea
     // ---- Accessors / to_owned / map views ----
     let mut accessors = String::new();
     for (i, s) in specs.iter().enumerate() {
+        if s.reserved {
+            continue;
+        }
         let _ = writeln!(accessors, "{}", emit_accessor(s, &name, opt_bits[i]));
     }
     let mut owned_inits = String::new();
@@ -203,9 +200,35 @@ pub fn expand_struct(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStrea
     }
     let mut map_views = String::new();
     for s in &specs {
+        if s.reserved {
+            continue;
+        }
         if let TyKind::Map { key, value } = &s.kind {
             map_views.push_str(&emit_map_view(s, key, value, &name));
         }
+    }
+
+    // ---- validate ----
+    let mut base_checks = String::new();
+    if let Some(idxs) = blocks.get(&1) {
+        for &i in idxs {
+            if !specs[i].reserved {
+                base_checks.push_str(&emit_field_validate(&specs[i], opt_bits[i], "origin"));
+            }
+        }
+    }
+    let mut ext_checks = String::new();
+    // Highest version first: a corrupt tail is reported at the block that owns it.
+    for &v in ext_versions.iter().rev() {
+        let mut body = String::new();
+        for &i in &blocks[&v] {
+            if !specs[i].reserved {
+                body.push_str(&emit_field_validate(&specs[i], opt_bits[i], "__bs"));
+            }
+        }
+        ext_checks.push_str(&format!(
+            "if hv >= {v}u8 {{\n    let (__bs, _) = ::message_core::check_ext_block(payload, <{name} as ::message_core::Message>::EXT_VERSIONS, hv, {v}u16, __L.b{v}_fixed_len)?;\n    {body}\n}}\n"
+        ));
     }
 
     // ---- Descriptor ----
@@ -286,6 +309,12 @@ impl {name} {{
             header_version: ::message_core::read_u8(buf, 6usize),
         }})
     }}
+
+    /// Strictly check an untrusted buffer; after `Ok` no accessor on the reader can panic.
+    pub fn validate(buf: &[u8]) -> ::core::result::Result<(), ::message_core::ValidationError> {{
+        ::message_core::validate_header(buf, <{name} as ::message_core::Message>::KEY, <{name} as ::message_core::Fixed>::FIXED_LEN)?;
+        <{name} as ::message_core::StructDecode>::__validate(&buf[::message_core::HEADER_LEN..], 0usize, ::message_core::read_u8(buf, 6usize))
+    }}
 }}
 
 impl ::message_core::Fixed for {name} {{
@@ -306,6 +335,11 @@ impl ::message_core::StructDecode for {name} {{
     }}
     fn __owned(reader: &{reader_ty}<'_>) -> {name} {{
         reader.to_owned()
+    }}
+    fn __validate(payload: &[u8], origin: usize, hv: u8) -> ::message_core::VResult {{
+        {base_checks}
+        {ext_checks}
+        ::core::result::Result::Ok(())
     }}
 }}
 
@@ -407,6 +441,11 @@ pub fn expand_enum(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStream,
         .map(|(n, v, _)| format!("{v} => {name}::{n},"))
         .collect::<Vec<_>>()
         .join(" ");
+    let arms_try = variants
+        .iter()
+        .map(|(n, v, _)| format!("{v} => ::core::option::Option::Some({name}::{n}),"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let variant_descs = variants
         .iter()
         .map(|(n, v, d)| {
@@ -437,6 +476,9 @@ impl ::message_core::StructDecode for {name} {{
         ::message_core::EnumType::__from_i32(::message_core::read_i32(payload, origin))
     }}
     fn __owned(r: &{name}) -> {name} {{ *r }}
+    fn __validate(payload: &[u8], origin: usize, _hv: u8) -> ::message_core::VResult {{
+        ::message_core::check_enum::<{name}>(payload, origin)
+    }}
 }}
 
 impl ::message_core::EnumType for {name} {{
@@ -444,6 +486,9 @@ impl ::message_core::EnumType for {name} {{
     fn __to_i32(self) -> i32 {{ self as i32 }}
     fn __from_i32(v: i32) -> Self {{
         match v {{ {arms} _ => ::core::panic!("unknown {name} value: {{v}}") }}
+    }}
+    fn __try_from_i32(v: i32) -> ::core::option::Option<Self> {{
+        match v {{ {arms_try} _ => ::core::option::Option::None }}
     }}
     fn __descriptor() -> &'static ::message_core::EnumDescriptor {{
         static __D: ::std::sync::OnceLock<::message_core::EnumDescriptor> = ::std::sync::OnceLock::new();
@@ -510,7 +555,14 @@ fn parse_field_attrs(spec: &mut FieldSpec, attrs: &[syn::Attribute]) -> Result<(
                 if meta.path.is_ident("since") {
                     let v = meta.value()?;
                     let lit: syn::LitInt = v.parse()?;
-                    spec.since = lit.base10_parse()?;
+                    let since: u16 = lit.base10_parse()?;
+                    if !(1..=u8::MAX as u16).contains(&since) {
+                        return Err(syn::Error::new_spanned(
+                            &lit,
+                            format!("since must be in 1..=255 (got {since}); the header version field is a u8"),
+                        ));
+                    }
+                    spec.since = since;
                     Ok(())
                 } else if meta.path.is_ident("precise") {
                     spec.precise = true;
@@ -565,11 +617,14 @@ fn check_kind_supported(spec: &FieldSpec) -> Result<(), syn::Error> {
     }
     match &spec.kind {
         TyKind::Map { key, value } => {
-            if matches!(**key, TyKind::Path(_)) {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "V1 map keys only support scalars and String",
-                ));
+            match key.as_ref() {
+                TyKind::Scalar(_) | TyKind::Str | TyKind::Path(_) => {}
+                TyKind::Bytes | TyKind::Array { .. } | TyKind::Map { .. } => {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        "V1 map keys must be a fixed-size scalar, String, or an enum",
+                    ));
+                }
             }
             check_elem(value)
         }
@@ -799,13 +854,20 @@ fn emit_map_write(kind: &TyKind, val: &str, pos: &str, field: &str) -> String {
     let v_off = format!("__L.m_{field}_v_off");
     let k_pos = "__e".to_string();
     let v_pos = format!("__e + {v_off}");
-    let k_write = match key.as_ref() {
-        TyKind::Scalar(sc) => sc_write(*sc, &k_pos, "(**k)"),
-        TyKind::Str => format!(
-            "{{ let __p = buf.append((**k).as_bytes()); {} }}",
-            slot_patch(&k_pos, "__p", "(**k).len()")
+    let (k_write, sort) = match key.as_ref() {
+        TyKind::Scalar(sc) => (sc_write(*sc, &k_pos, "(**k)"), "__entries.sort_by(|a, b| a.0.cmp(b.0));".to_string()),
+        TyKind::Str => (
+            format!(
+                "{{ let __p = buf.append((**k).as_bytes()); {} }}",
+                slot_patch(&k_pos, "__p", "(**k).len()")
+            ),
+            "__entries.sort_by(|a, b| a.0.cmp(b.0));".to_string(),
         ),
-        _ => String::new(),
+        TyKind::Path(_) => (
+            format!("buf.write_u32({k_pos}, ::message_core::EnumType::__to_i32(**k) as u32);"),
+            "__entries.sort_by_key(|(k, _)| ::message_core::EnumType::__to_i32(**k));".to_string(),
+        ),
+        _ => return String::new(),
     };
     let v_write = match value.as_ref() {
         TyKind::Scalar(sc) => sc_write(*sc, &v_pos, "(**v)"),
@@ -820,10 +882,11 @@ fn emit_map_write(kind: &TyKind, val: &str, pos: &str, field: &str) -> String {
         TyKind::Path(_) => {
             format!("::message_core::StructEncode::__write_fixed(*v, buf, {v_pos});")
         }
+        TyKind::Array { elem, fixed } => emit_array_write("(**v)", elem, *fixed, &v_pos),
         _ => String::new(),
     };
     format!(
-        "{{\n    let mut __entries: ::std::vec::Vec<_> = ({val}).iter().collect();\n    __entries.sort_by(|a, b| a.0.cmp(b.0));\n    let __n = __entries.len();\n    let __region = buf.reserve(__n * {stride});\n    for (i, (k, v)) in __entries.iter().enumerate() {{\n        let __e = __region + i * {stride};\n        {k_write}\n        {v_write}\n    }}\n    {}\n}}",
+        "{{\n    let mut __entries: ::std::vec::Vec<_> = ({val}).iter().collect();\n    {sort}\n    let __n = __entries.len();\n    let __region = buf.reserve(__n * {stride});\n    for (i, (k, v)) in __entries.iter().enumerate() {{\n        let __e = __region + i * {stride};\n        {k_write}\n        {v_write}\n    }}\n    {}\n}}",
         slot_patch(pos, "buf.payload_rel(__region)", "__n")
     )
 }
@@ -945,8 +1008,8 @@ fn emit_accessor(s: &FieldSpec, parent: &str, opt_bit: Option<usize>) -> String 
 
     if ext {
         let find = format!(
-            "::message_core::find_ext_block(self.payload, <{parent} as ::message_core::Message>::EXT_VERSIONS, self.header_version, {}u16)",
-            s.since
+            "::message_core::find_ext_block(self.payload, <{parent} as ::message_core::Message>::EXT_VERSIONS, self.header_version, {since}u16, __L.b{since}_fixed_len)",
+            since = s.since
         );
         if s.optional {
             format!(
@@ -975,6 +1038,73 @@ fn emit_accessor(s: &FieldSpec, parent: &str, opt_bit: Option<usize>) -> String 
     }
 }
 
+// ---------- Validate emission ----------
+
+/// Strict check of one field located at `origin + __L.f_<name>` (optional fields only when their
+/// bitmap bit is set).
+fn emit_field_validate(s: &FieldSpec, opt_bit: Option<usize>, origin: &str) -> String {
+    let pos = format!("{origin} + __L.{}", layout_field(&s.name));
+    let check = emit_validate_value(&s.kind, &pos, &s.name, "::core::option::Option::None", "hv", 0);
+    if s.optional {
+        let bit = opt_bit.unwrap_or(0);
+        format!("if ::message_core::read_bitmap_bit(&payload[{origin}..], {bit}usize) {{ {check} }}")
+    } else {
+        check
+    }
+}
+
+/// Statement(s) strictly checking a value of `kind` at absolute payload position `pos`. Leaf
+/// errors are nested under `field` (element `idx`); `depth` keeps loop variables unique.
+fn emit_validate_value(kind: &TyKind, pos: &str, field: &str, idx: &str, hv: &str, depth: usize) -> String {
+    let nest = |index: &str| format!(".map_err(|e| ::message_core::ValidationError::nested(e, \"{field}\", {index}))?");
+    let call = |expr: String, index: &str| format!("{expr}{};", nest(index));
+    match kind {
+        TyKind::Scalar(_) => String::new(),
+        TyKind::Str => call(format!("::message_core::check_str_slot(payload, {pos})"), idx),
+        TyKind::Bytes => call(format!("::message_core::check_bytes_slot(payload, {pos})"), idx),
+        TyKind::Path(p) => call(
+            format!("<{} as ::message_core::StructDecode>::__validate(payload, {pos}, {hv})", ty_str(p)),
+            idx,
+        ),
+        TyKind::Array { elem, fixed } => {
+            let stride = element_size_str(elem).unwrap_or_else(|_| "8usize".into());
+            let i = format!("i{depth}");
+            let idx_some = format!("::core::option::Option::Some({i})");
+            if fixed.is_some() && !is_slot_shaped(elem) {
+                let body = emit_validate_value(elem, &format!("{pos} + {i} * {stride}"), field, &idx_some, "0u8", depth + 1);
+                if body.is_empty() {
+                    String::new()
+                } else {
+                    format!("for {i} in 0..{}usize {{ {body} }}", fixed.unwrap())
+                }
+            } else {
+                let (o, n, p) = (format!("__o{depth}"), format!("__n{depth}"), format!("__p{depth}"));
+                let body = emit_validate_value(elem, &p, field, &idx_some, "0u8", depth + 1);
+                if body.is_empty() {
+                    call(format!("::message_core::check_region(payload, {pos}, {stride})"), idx)
+                } else {
+                    format!(
+                        "let ({o}, {n}) = ::message_core::check_region(payload, {pos}, {stride}){}; for {i} in 0..{n} {{ let {p} = {o} + {i} * {stride}; {body} }}",
+                        nest(idx)
+                    )
+                }
+            }
+        }
+        TyKind::Map { key, value } => {
+            let (o, n, i, e) = (format!("__o{depth}"), format!("__n{depth}"), format!("i{depth}"), format!("__e{depth}"));
+            let stride = format!("__L.m_{field}_stride");
+            let v_pos = format!("{e} + __L.m_{field}_v_off");
+            let idx_some = format!("::core::option::Option::Some({i})");
+            let k = emit_validate_value(key, &e, field, &idx_some, "0u8", depth + 1);
+            let v = emit_validate_value(value, &v_pos, field, &idx_some, "0u8", depth + 1);
+            format!(
+                "let ({o}, {n}) = ::message_core::check_region(payload, {pos}, {stride}){}; for {i} in 0..{n} {{ let {e} = {o} + {i} * {stride}; {k} {v} }}",
+                nest(idx)
+            )
+        }
+    }
+}
+
 // ---------- Map views ----------
 
 fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> String {
@@ -985,6 +1115,7 @@ fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> 
 
     let key_ret = match key {
         TyKind::Scalar(sc) => rust_scalar_ty(*sc).to_string(),
+        TyKind::Path(p) => ty_str(p),
         _ => "&'a str".to_string(),
     };
     let val_ret = match value {
@@ -994,11 +1125,15 @@ fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> 
         TyKind::Path(p) => {
             format!("<{} as ::message_core::StructDecode>::Reader<'a>", ty_str(p))
         }
+        TyKind::Array { .. } => view_ret_ty(value),
         _ => "::core::unreachable!()".to_string(),
     };
     let key_read = |pos: &str| -> String {
         match key {
             TyKind::Scalar(sc) => sc_read(*sc, "self.payload", pos),
+            TyKind::Path(_) => format!(
+                "::message_core::EnumType::__from_i32(::message_core::read_i32(self.payload, {pos}))"
+            ),
             _ => format!(
                 "{{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); ::core::str::from_utf8(::message_core::slot_slice(self.payload, o, l)).expect(\"invalid utf-8 in map key\") }}"
             ),
@@ -1019,6 +1154,10 @@ fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> 
                     ty_str(p)
                 )
             }
+            TyKind::Array { .. } => format!(
+                "{{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); {} }}",
+                view_ctor(value, "self.payload", "o as usize", "l as usize")
+            ),
             _ => "::core::unreachable!()".to_string(),
         }
     };
@@ -1055,6 +1194,9 @@ impl<'a> {view}<'a> {{
 // ---------- to_owned ----------
 
 fn owned_field_expr(s: &FieldSpec) -> String {
+    if s.reserved {
+        return "::core::default::Default::default()".into();
+    }
     let base = format!("self.{}()", s.name);
     if s.optional {
         format!(
@@ -1098,6 +1240,7 @@ fn owned_inner_expr(kind: &TyKind, base: &str, ty: &syn::Type) -> String {
                 TyKind::Path(p) => {
                     format!("<{} as ::message_core::StructDecode>::__owned(&w)", ty_str(p))
                 }
+                TyKind::Array { elem, .. } => owned_list_expr("w", elem, "self.payload"),
                 _ => "w".to_string(),
             };
             format!(
@@ -1165,4 +1308,47 @@ fn field_desc_body(s: &FieldSpec, opt_bit: Option<usize>) -> String {
         es = elem_size,
         mvo = map_vo,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expand(src: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
+        let input: syn::DeriveInput = syn::parse_str(src).unwrap();
+        expand_struct(&input)
+    }
+
+    #[test]
+    fn since_outside_1_to_255_is_a_compile_error() {
+        for bad in ["#[msg(since = 300)]", "#[msg(since = 0)]"] {
+            let err = expand(&format!("#[msg(key = 1)] struct X {{ {bad} a: u8 }}")).unwrap_err();
+            assert!(err.to_string().contains("1..=255"), "{bad}: {err}");
+        }
+        assert!(expand("#[msg(key = 1)] struct X { #[msg(since = 255)] a: u8 }").is_ok());
+    }
+
+    #[test]
+    fn map_key_rules_match_the_core_layer() {
+        for bad in ["Vec<u8>", "Vec<u32>", "std::collections::BTreeMap<String, u32>"] {
+            let err = expand(&format!(
+                "#[msg(key = 1)] struct X {{ m: std::collections::HashMap<{bad}, u32> }}"
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains("map keys"), "{bad}: {err}");
+        }
+        let ok = [
+            "std::collections::HashMap<Color, u32>",
+            "std::collections::HashMap<String, Vec<String>>",
+            "std::collections::HashMap<u64, Vec<u8>>",
+        ];
+        for good in ok {
+            assert!(expand(&format!("#[msg(key = 1)] struct X {{ m: {good} }}")).is_ok(), "{good}");
+        }
+        assert!(
+            expand("#[msg(key = 1)] struct X { m: std::collections::HashMap<String, [u8; 4]> }")
+                .is_err(),
+            "fixed arrays cannot be map values"
+        );
+    }
 }

@@ -2,6 +2,7 @@
 
 use crate::descriptor::{EnumDescriptor, MessageDescriptor};
 use crate::rt::EncBuf;
+use crate::ValidationError;
 
 /// Fixed layout constants. Both structs and enums implement this (enums are pinned to 4/4) so
 /// parents can do symbolic constant layout math via `<T as Fixed>::FIXED_LEN`.
@@ -24,6 +25,10 @@ pub trait StructDecode: Fixed + Sized {
     type Reader<'a>;
     fn __reader<'a>(payload: &'a [u8], origin: usize, header_version: u8) -> Self::Reader<'a>;
     fn __owned(reader: &Self::Reader<'_>) -> Self;
+    /// Strictly check the value at `origin` (enums: known discriminant; structs: every slot,
+    /// string and nested value reachable from the fixed region). Leaf errors are returned
+    /// un-nested; the caller wraps them with the field path.
+    fn __validate(payload: &[u8], origin: usize, header_version: u8) -> Result<(), ValidationError>;
 }
 
 /// Top-level message type.
@@ -40,6 +45,8 @@ pub trait EnumType: Sized + Copy {
     fn __to_i32(self) -> i32;
     /// Panics on unknown values (validate untrusted data before reading).
     fn __from_i32(v: i32) -> Self;
+    /// Non-panicking counterpart of `__from_i32`.
+    fn __try_from_i32(v: i32) -> Option<Self>;
     fn __descriptor() -> &'static EnumDescriptor;
 }
 

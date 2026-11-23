@@ -3,7 +3,7 @@
 //! Single source of truth for the protocol: descriptors emitted by the derive macro,
 //! the exported JSON IR, and the layout data consumed by every language backend.
 //!
-//! Layout invariants (see SPEC):
+//! Layout invariants (see SPEC.md at the repository root):
 //! - the key lives only in the header; alignment and layout never depend on it;
 //! - payload is little-endian; fields follow natural alignment; offsets are compile-time constants;
 //! - fields with `since >= 2` belong to the extension block of that version; the base layout is frozen forever;
@@ -17,12 +17,13 @@ mod registry;
 mod rt;
 mod traits;
 mod types;
+mod validate;
 
 pub use descriptor::{
     EnumDescriptor, EnumVariant, ExtBlockLayout, FieldDescriptor, MessageDescriptor,
     MessageLayout, SchemaSet, SINCE_BASE,
 };
-pub use errors::SchemaError;
+pub use errors::{SchemaError, ValidationError};
 pub use layout::{plan_schema, set_to_json_string};
 pub use registry::{check_consistency, collect_raw, collect_schema};
 pub use rt::{
@@ -34,6 +35,10 @@ pub use traits::{EnumType, Fixed, Message, SchemaEntry, StructDecode, StructEnco
 pub use types::{
     align_up_usize, element_size, field_size, map_entry_size, type_align, ArrayBody, MapBody,
     SimpleType, Type,
+};
+pub use validate::{
+    check_bytes_slot, check_enum, check_ext_block, check_region, check_str_slot, validate_header,
+    VResult,
 };
 
 /// Re-exported for derive-generated code (avoids a direct inventory dep in user crates).

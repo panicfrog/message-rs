@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { User, UserReader } from '../src/schema.js';
+import { Tally, TallyReader, User, UserReader } from '../src/schema.js';
 import { encodeMessage, type SchemaIr } from '../src/runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const vector = JSON.parse(readFileSync(path.join(root, 'vectors/user.json'), 'utf8'));
+const tallyVector = JSON.parse(readFileSync(path.join(root, 'vectors/tally.json'), 'utf8'));
 const schema: SchemaIr = JSON.parse(
   readFileSync(path.join(root, 'vectors/message-snapshot.json'), 'utf8'),
 );
@@ -104,5 +105,35 @@ describe('Rust <-> TS cross-language conformance (full-type User vector)', () =>
     expect(User.fromReader(r)).toEqual(u);
     // re-encode the object; must match Rust byte for byte
     expect(toHex(User.encode(u!))).toBe(vector.hex);
+  });
+});
+
+describe('Rust <-> TS conformance (enum-keyed / array-valued maps)', () => {
+  it('decode: enum keys come back as the numeric value, array values as views', () => {
+    const r = TallyReader.decode(fromHex(tallyVector.hex));
+    expect(r).not.toBeNull();
+    expect(r!.usage.length).toBe(2);
+    expect(r!.usage.key(0)).toBe(0); // Color.Red
+    expect(r!.usage.value(0)).toBe(1);
+    expect(r!.usage.key(1)).toBe(2); // Color.Blue
+    expect(r!.usage.value(1)).toBe(3);
+    expect(r!.labels.key(0)).toBe('a');
+    expect(r!.labels.value(0).get(1)).toBe('y');
+    expect(r!.labels.key(1)).toBe('b');
+    expect(r!.labels.value(1).length).toBe(0);
+  });
+
+  it('encode: byte-identical to Rust with numeric-string enum keys', () => {
+    expect(toHex(encodeMessage(schema, 'Tally', tallyVector.expected))).toBe(tallyVector.hex);
+  });
+
+  it('object layer: roundtrip is byte-identical; variant names are accepted as enum keys', () => {
+    const t = Tally.fromBytes(fromHex(tallyVector.hex));
+    expect(t).not.toBeNull();
+    expect(t!.usage).toEqual({ '0': 1, '2': 3 });
+    expect(t!.labels).toEqual({ a: ['x', 'y'], b: [] });
+    expect(toHex(Tally.encode(t!))).toBe(tallyVector.hex);
+    const byName = { usage: { Red: 1, Blue: 3 }, labels: { a: ['x', 'y'], b: [] } } as unknown as Tally;
+    expect(toHex(Tally.encode(byName))).toBe(tallyVector.hex);
   });
 });

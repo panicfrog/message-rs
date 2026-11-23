@@ -27,7 +27,9 @@ pub struct FieldDescriptor {
     /// u64 precision flag: maps to bigint on the TS side (default number, 2^53 limit).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub precise: bool,
-    /// Reserved placeholder: participates in layout but no accessors are generated (the equivalent of "deletion" during evolution).
+    /// Reserved placeholder: participates in layout and is still encoded from the struct field, but
+    /// no accessor is generated, `to_owned()` yields `Default::default()` for it (the type must
+    /// implement Default), and the TS side omits it and encodes zeros. The sanctioned "deletion".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reserved: bool,
 

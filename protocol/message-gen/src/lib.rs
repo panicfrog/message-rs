@@ -18,6 +18,7 @@ use message_core::{collect_schema, set_to_json_string, SchemaSet};
 use std::path::Path;
 
 mod backend_ts;
+pub use backend_ts::{generate_ts, generate_ts_split};
 
 pub const DEFAULT_SNAPSHOT: &str = "message-snapshot.json";
 
@@ -174,12 +175,13 @@ pub fn ir_dump(key: Option<u32>) -> Result<Option<String>, String> {
 
 /// Append-only evolution rules. The base and existing extension blocks of a known message must
 /// stay identical field by field; new fields must declare a strictly larger since; deletion and
-/// reordering are rejected.
+/// reordering are rejected. Marking an existing field `reserved` is the sanctioned way to delete
+/// it and passes; un-reserving one or flipping `precise` (number <-> bigint on the TS side) does not.
 pub fn check_evolution(old: &SchemaSet, new: &SchemaSet) -> Vec<String> {
     let mut errs = Vec::new();
     for om in &old.messages {
         let Some(nm) = new.messages.iter().find(|m| m.name == om.name) else {
-            errs.push(format!("message `{}` was removed (use a #[msg(reserved)] placeholder instead of deleting)", om.name));
+            errs.push(format!("message `{}` was removed (published messages cannot be deleted; keep it registered, or reserve its fields)", om.name));
             continue;
         };
         if nm.key != om.key {
@@ -241,9 +243,15 @@ pub fn check_evolution(old: &SchemaSet, new: &SchemaSet) -> Vec<String> {
                 || nf.size != of.size
                 || nf.slot != of.slot
                 || nf.optional_bit != of.optional_bit
+                || nf.precise != of.precise
             {
                 errs.push(format!(
-                    "`{}`.`{}`: field definition changed (type/optional/since/offset/slot mismatch)",
+                    "`{}`.`{}`: field definition changed (type/optional/since/precise/offset/slot mismatch)",
+                    om.name, of.name
+                ));
+            } else if of.reserved && !nf.reserved {
+                errs.push(format!(
+                    "`{}`.`{}`: reserved field was un-reserved (a reserved field is deleted from the API; add a new field with a larger `since` instead)",
                     om.name, of.name
                 ));
             }

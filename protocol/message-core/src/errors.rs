@@ -21,3 +21,33 @@ pub enum SchemaError {
     #[error("struct `{0}` has versioned (since >= 2) fields and cannot be referenced by other types in V1; evolve the containing message instead")]
     EvolvedStructInline(String),
 }
+
+/// Strict check of an untrusted buffer (`Xxx::validate`). Leaves describe what is wrong; the
+/// generated code wraps them in [`ValidationError::Nested`] down to the field (and element) where
+/// the problem was found, e.g. `at `edges`[0]: at `children`[1]: invalid utf-8`.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ValidationError {
+    #[error("buffer too short: need {need} bytes, got {got}")]
+    TooShort { need: usize, got: usize },
+    #[error("key mismatch: expected {expected}, got {got}")]
+    KeyMismatch { expected: u32, got: u32 },
+    #[error("header fixed_len mismatch: expected {expected}, got {got}")]
+    FixedLenMismatch { expected: usize, got: usize },
+    #[error("extension block v{version} missing or malformed")]
+    ExtBlock { version: u16 },
+    #[error("slot out of bounds (off={off} len={len}, payload={end})")]
+    SlotOutOfBounds { off: usize, len: usize, end: usize },
+    #[error("invalid utf-8")]
+    InvalidUtf8,
+    #[error("unknown {enum_name} value {value}")]
+    UnknownEnumValue { enum_name: &'static str, value: i32 },
+    #[error("at `{field}`{}: {source}", .index.map(|i| format!("[{i}]")).unwrap_or_default())]
+    Nested { field: &'static str, index: Option<usize>, source: Box<ValidationError> },
+}
+
+impl ValidationError {
+    /// Wrap `self` as having been found inside `field` (element `index` for arrays and maps).
+    pub fn nested(self, field: &'static str, index: Option<usize>) -> Self {
+        ValidationError::Nested { field, index, source: Box::new(self) }
+    }
+}

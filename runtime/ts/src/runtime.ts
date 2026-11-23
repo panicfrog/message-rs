@@ -1,7 +1,7 @@
 /**
  * message-rs TypeScript runtime (zero-dependency; works on RN (Hermes), Web and Node).
  *
- * Layout rules follow the repo SPEC: little-endian payload; slot `{ offset: u32, len: u32 }`
+ * Layout rules follow the repo SPEC.md: little-endian payload; slot `{ offset: u32, len: u32 }`
  * offsets are payload-relative; extension blocks are
  * `[ bitmap | fixed fields | var data | since:u16 | block_len:u32 ]` with the trailer at the
  * tail, located by walking back from the payload end.
@@ -73,26 +73,34 @@ export function utf8Encode(s: string): Uint8Array {
   return TE.encode(s);
 }
 
-/** Locate an extension block by walking back from the payload end; returns its payload start (trailer excluded). */
+/**
+ * Locate an extension block by walking back from the payload end; returns its payload start
+ * (trailer excluded). Blocks newer than `target` are stepped over even when this reader does not
+ * know them (an older reader must still find its own blocks behind a newer writer's). `minLen` is
+ * the block's fixed region: a block too short to hold its fields counts as absent.
+ */
 export function findExtBlock(
   dv: DataView,
   versions: readonly number[],
   hv: number,
   target: number,
+  minLen = 0,
 ): number | null {
   let pos = dv.byteLength;
-  for (let i = versions.length - 1; i >= 0; i--) {
-    const v = versions[i];
-    if (v > hv) continue;
+  const maxKnown = versions.length ? versions[versions.length - 1] : 0;
+  for (;;) {
     if (pos < 6) return null;
     const since = dv.getUint16(pos - 6, true);
     const blen = dv.getUint32(pos - 4, true);
-    if (since !== v || blen < 6 || blen > pos) return null;
+    if (since < 2 || since > hv || blen < 6 || blen > pos) return null;
     const start = pos - blen;
-    if (v === target) return start;
-    pos = start;
+    if (since === target) return pos - 6 - start >= minLen ? start : null;
+    if (since > target && (since > maxKnown || versions.includes(since))) {
+      pos = start;
+      continue;
+    }
+    return null;
   }
-  return null;
 }
 
 // ---- Lazy views ----
@@ -327,6 +335,7 @@ function writeBlock(
   value: Record<string, unknown>,
 ): void {
   for (const f of fields) {
+    if (f.reserved) continue; // deleted from the API: the pre-zeroed region is left as-is
     let v = pick(value, f.name);
     if (f.optional) {
       if (v === null || v === undefined) continue;
@@ -365,47 +374,85 @@ function writeValue(enc: Enc, schema: SchemaIr, f: FieldIr, pos: number, v: unkn
     return;
   }
   if ('array' in t) {
-    const arr = (v as unknown[]) ?? [];
     const { elem, fixed } = t.array;
-    const elemIsSlot = typeof elem === 'string' && (elem === 'string' || elem === 'bytes')
-      || (typeof elem !== 'string' && ('array' in elem || 'map' in elem));
-    if (fixed != null && !elemIsSlot) {
-      // inline fixed-length array
-      for (let i = 0; i < arr.length && i < fixed; i++) {
-        writeElemInline(enc, schema, elem, pos + i * elemWidth(schema, elem), arr[i]);
-      }
-      return;
-    }
-    const stride = f.elementSize ?? 8;
-    const n = arr.length;
-    const region = enc.reserve(n * stride);
-    writeElems(enc, schema, elem, region, stride, arr);
-    enc.patchSlot(pos, enc.payloadRel(region), n);
+    writeArraySlot(enc, schema, elem, fixed, f.elementSize ?? 8, pos, v);
     return;
   }
   if ('map' in t) {
     const obj = (v as Record<string, unknown>) ?? {};
-    const keys = Object.keys(obj).sort();
-    const n = keys.length;
+    const kt = t.map.key;
+    // Resolve keys to their wire form first: the canonical order is by wire value (Rust sorts
+    // entries by key), so enum keys must order by value, not by variant spelling.
+    const entries = Object.keys(obj).map((k) => {
+      let kv = mapKeyNum(schema, kt, k);
+      if (typeof kt !== 'string' && 'enum' in kt && typeof kv === 'string') kv = enumValue(schema, kt.enum, kv);
+      return { kv, v: obj[k] };
+    });
+    entries.sort((a, b) => compareKeys(a.kv, b.kv));
+    const n = entries.length;
     const stride = f.elementSize ?? 8;
     const vOff = f.mapValueOffset ?? 0;
     const region = enc.reserve(n * stride);
     for (let i = 0; i < n; i++) {
       const e = region + i * stride;
-      const kv = mapKeyNum(schema, t.map.key, keys[i]);
-      writeElemInline(enc, schema, t.map.key, e, kv);
-      writeElemInline(enc, schema, t.map.value, e + vOff, obj[keys[i]]);
+      writeElemInline(enc, schema, kt, e, entries[i].kv);
+      const vt = t.map.value;
+      if (typeof vt !== 'string' && 'array' in vt) {
+        writeArraySlot(enc, schema, vt.array.elem, vt.array.fixed, elemWidth(schema, vt.array.elem), e + vOff, entries[i].v);
+      } else {
+        writeElemInline(enc, schema, vt, e + vOff, entries[i].v);
+      }
     }
     enc.patchSlot(pos, enc.payloadRel(region), n);
     return;
   }
 }
 
+function compareKeys(a: string | number | bigint, b: string | number | bigint): number {
+  if (typeof a === 'string' || typeof b === 'string') {
+    const sa = String(a);
+    const sb = String(b);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  }
+  if (typeof a === 'bigint' || typeof b === 'bigint') {
+    const x = typeof a === 'bigint' ? a : BigInt(a);
+    const y = typeof b === 'bigint' ? b : BigInt(b);
+    return x < y ? -1 : x > y ? 1 : 0;
+  }
+  return (a as number) - (b as number);
+}
+
 function elemWidth(schema: SchemaIr, elem: TypeIr): number {
-  if (typeof elem === 'string') return scalarWidth(elem);
+  if (typeof elem === 'string') return (elem === 'string' || elem === 'bytes') ? 8 : scalarWidth(elem);
   if ('enum' in elem) return 4;
   if ('struct' in elem) return schema.messages.find((m) => m.name === elem.struct)?.layout.fixedLen ?? 0;
   return 8; // slot-shaped element
+}
+
+/** Write an array at `pos`: an inline fixed region, or a slot pointing at a reserved element region. `stride` is the element footprint. */
+function writeArraySlot(
+  enc: Enc,
+  schema: SchemaIr,
+  elem: TypeIr,
+  fixed: number | null | undefined,
+  stride: number,
+  pos: number,
+  v: unknown,
+): void {
+  const arr = (v as unknown[]) ?? [];
+  const elemIsSlot = typeof elem === 'string' && (elem === 'string' || elem === 'bytes')
+    || (typeof elem !== 'string' && ('array' in elem || 'map' in elem));
+  if (fixed != null && !elemIsSlot) {
+    // inline fixed-length array
+    for (let i = 0; i < arr.length && i < fixed; i++) {
+      writeElemInline(enc, schema, elem, pos + i * elemWidth(schema, elem), arr[i]);
+    }
+    return;
+  }
+  const n = arr.length;
+  const region = enc.reserve(n * stride);
+  writeElems(enc, schema, elem, region, stride, arr);
+  enc.patchSlot(pos, enc.payloadRel(region), n);
 }
 
 function writeElemInline(enc: Enc, schema: SchemaIr, elem: TypeIr, pos: number, v: unknown): void {
@@ -462,12 +509,8 @@ function writeElems(
     } else if ('struct' in elem) {
       writeElemInline(enc, schema, elem, region + i * stride, v);
     } else if ('array' in elem) {
-      // nested dynamic array: the element contributes a slot pointing at the inner region
-      const inner = (v as unknown[]) ?? [];
-      const innerStride = elemWidth(schema, elem.array.elem);
-      const innerRegion = enc.reserve(inner.length * innerStride);
-      writeElems(enc, schema, elem.array.elem, innerRegion, innerStride, inner);
-      enc.patchSlot(region + i * 8, enc.payloadRel(innerRegion), inner.length);
+      // nested dynamic array: the element contributes an 8-byte slot pointing at the inner region
+      writeArraySlot(enc, schema, elem.array.elem, elem.array.fixed, elemWidth(schema, elem.array.elem), region + i * 8, v);
     } else {
       throw new Error('maps cannot be array elements');
     }
@@ -487,7 +530,11 @@ function mapKeyNum(schema: SchemaIr, key: TypeIr, s: string): string | number | 
     if (key === 'string') return s;
     return Number(s);
   }
-  if ('enum' in key) return s; // handled by the enum string branch
+  if ('enum' in key) {
+    // enum keys are the numeric value as a string (what decode produces); a variant name is also accepted
+    const n = Number(s);
+    return Number.isNaN(n) ? s : n;
+  }
   return s;
 }
 
@@ -514,4 +561,155 @@ export function encodeMessage(schema: SchemaIr, msgName: string, value: Record<s
   enc.u8(6, versions.length > 0 ? versions[versions.length - 1] : 0);
   enc.u8(7, 0);
   return enc.finish();
+}
+
+// ---- Strict validation ----
+
+/** Field names and element indices from the message root down to the leaf, e.g. `['edges', 0, 'children']`. */
+export type ValidationPath = (string | number)[];
+
+export class ValidationError extends Error {
+  readonly path: ValidationPath;
+  constructor(readonly reason: string, path: ValidationPath = []) {
+    super(path.length ? `at ${path.map(String).join('.')}: ${reason}` : reason);
+    this.name = 'ValidationError';
+    this.path = path;
+  }
+}
+
+const TD_STRICT = new TextDecoder('utf-8', { fatal: true });
+
+function vSlot(dv: DataView, pos: number, path: ValidationPath): [number, number] {
+  const off = dv.getUint32(pos, true);
+  const len = dv.getUint32(pos + 4, true);
+  if (off + len > dv.byteLength) {
+    throw new ValidationError(`slot out of bounds (off=${off} len=${len}, payload=${dv.byteLength})`, path);
+  }
+  return [off, len];
+}
+
+function vStr(dv: DataView, pos: number, path: ValidationPath): void {
+  const [o, l] = vSlot(dv, pos, path);
+  try {
+    TD_STRICT.decode(slotBytes(dv, o, l));
+  } catch {
+    throw new ValidationError('invalid utf-8', path);
+  }
+}
+
+/** Slot whose length is an element count; returns (offset, count). */
+function vRegion(dv: DataView, pos: number, stride: number, path: ValidationPath): [number, number] {
+  const off = dv.getUint32(pos, true);
+  const count = dv.getUint32(pos + 4, true);
+  if (off + count * stride > dv.byteLength) {
+    throw new ValidationError(`slot out of bounds (off=${off} len=${count}, payload=${dv.byteLength})`, path);
+  }
+  return [off, count];
+}
+
+function vEnum(schema: SchemaIr, name: string, dv: DataView, pos: number, path: ValidationPath): void {
+  const v = dv.getInt32(pos, true);
+  const e = schema.enums?.find((x) => x.name === name);
+  if (!e || !e.variants.some((x) => x.value === v)) {
+    throw new ValidationError(`unknown ${name} value ${v}`, path);
+  }
+}
+
+/** Stride / value offset of the composite being descended into. */
+interface VCtx {
+  stride: number;
+  valueOffset: number;
+}
+
+function validateFields(schema: SchemaIr, fields: FieldIr[], dv: DataView, origin: number, hv: number, path: ValidationPath): void {
+  for (const f of fields) {
+    if (f.reserved) continue;
+    if (f.optional && !readBitmapBit(dv, origin, f.optionalBit ?? 0)) continue;
+    validateValue(schema, f.type, dv, origin + f.offset, hv, [...path, f.name], {
+      stride: f.elementSize ?? 8,
+      valueOffset: f.mapValueOffset ?? 0,
+    });
+  }
+}
+
+function validateValue(schema: SchemaIr, type: TypeIr, dv: DataView, pos: number, hv: number, path: ValidationPath, ctx: VCtx): void {
+  if (typeof type === 'string') {
+    if (type === 'string') vStr(dv, pos, path);
+    else if (type === 'bytes') vSlot(dv, pos, path);
+    return;
+  }
+  if ('enum' in type) {
+    vEnum(schema, type.enum, dv, pos, path);
+    return;
+  }
+  if ('struct' in type) {
+    const sub = schema.messages.find((m) => m.name === type.struct);
+    if (!sub) throw new ValidationError(`unknown struct ${type.struct}`, path);
+    validateFields(schema, sub.fields.filter((x) => x.since === 1), dv, pos, hv, path);
+    return;
+  }
+  if ('array' in type) {
+    const { elem, fixed } = type.array;
+    const slotShaped = (typeof elem === 'string' && (elem === 'string' || elem === 'bytes'))
+      || (typeof elem !== 'string' && ('array' in elem || 'map' in elem));
+    const w = elemWidth(schema, elem);
+    if (fixed != null && !slotShaped) {
+      for (let i = 0; i < fixed; i++) validateElem(schema, elem, dv, pos + i * w, hv, [...path, i]);
+      return;
+    }
+    const [off, count] = vRegion(dv, pos, ctx.stride, path);
+    for (let i = 0; i < count; i++) validateElem(schema, elem, dv, off + i * ctx.stride, hv, [...path, i]);
+    return;
+  }
+  if ('map' in type) {
+    const [off, count] = vRegion(dv, pos, ctx.stride, path);
+    for (let i = 0; i < count; i++) {
+      const e = off + i * ctx.stride;
+      const p = [...path, i];
+      const kt = type.map.key;
+      if (kt === 'string') vStr(dv, e, p);
+      else if (typeof kt !== 'string' && 'enum' in kt) vEnum(schema, kt.enum, dv, e, p);
+      const vt = type.map.value;
+      validateValue(schema, vt, dv, e + ctx.valueOffset, hv, p, { stride: elemWidth(schema, vt), valueOffset: 0 });
+    }
+  }
+}
+
+function validateElem(schema: SchemaIr, elem: TypeIr, dv: DataView, pos: number, hv: number, path: ValidationPath): void {
+  validateValue(schema, elem, dv, pos, hv, path, { stride: elemWidth(schema, elem), valueOffset: 0 });
+}
+
+/**
+ * Strictly check an untrusted buffer (header, every slot range, utf-8, enum values, the extension
+ * chain). Returns null when valid; after that no getter / view access can throw. Reserved fields
+ * are not part of the API and are not checked.
+ */
+export function validateMessage(schema: SchemaIr, msgName: string, buf: Uint8Array): ValidationError | null {
+  const msg = schema.messages.find((m) => m.name === msgName);
+  if (!msg) throw new Error(`unknown message ${msgName}`);
+  try {
+    const need = HEADER_LEN + msg.layout.fixedLen;
+    if (buf.length < need) throw new ValidationError(`buffer too short: need ${need} bytes, got ${buf.length}`);
+    const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const key = full.getUint32(0, true);
+    if (key !== msg.key) throw new ValidationError(`key mismatch: expected ${msg.key}, got ${key}`);
+    const fl = full.getUint16(4, true);
+    if (fl !== msg.layout.fixedLen) throw new ValidationError(`header fixed_len mismatch: expected ${msg.layout.fixedLen}, got ${fl}`);
+    const hv = full.getUint8(6);
+    const dv = new DataView(buf.buffer, buf.byteOffset + HEADER_LEN, buf.byteLength - HEADER_LEN);
+    validateFields(schema, msg.fields.filter((f) => f.since === 1), dv, 0, hv, []);
+    const blocks = msg.layout.extBlocks ?? [];
+    const versions = blocks.map((b) => b.version);
+    // Highest version first: a corrupt tail is reported at the block that owns it.
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      if (blocks[i].version > hv) continue;
+      const bs = findExtBlock(dv, versions, hv, blocks[i].version, blocks[i].fixedLen);
+      if (bs === null) throw new ValidationError(`extension block v${blocks[i].version} missing or malformed`);
+      validateFields(schema, msg.fields.filter((f) => f.since === blocks[i].version), dv, bs, hv, []);
+    }
+    return null;
+  } catch (e) {
+    if (e instanceof ValidationError) return e;
+    throw e;
+  }
 }

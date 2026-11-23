@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --workspace
+      - name: Evolution gate against the committed snapshot
+        run: cargo run -p message-fixtures --bin export-schema -- check vectors/message-snapshot.json
+      - name: Generated artifacts are up to date
+        run: |
+          cargo run -p message-fixtures --bin export-schema -- export vectors/message-snapshot.json
+          cargo run -p message-fixtures --bin export-schema -- vectors vectors/user.json
+          cargo run -p message-fixtures --bin export-schema -- ts runtime/ts/src/schema.ts
+          git diff --exit-code --stat
+
+  typescript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runtime/ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: runtime/ts/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

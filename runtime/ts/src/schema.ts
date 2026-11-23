@@ -5,11 +5,55 @@ import {
   readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,
   readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,
   findExtBlock, ScalarListView, StringListView, BytesListView, SlotListView,
-  StructListView, encodeMessage, type SchemaIr,
+  StructListView, encodeMessage, validateMessage, type SchemaIr, type ValidationError,
 } from './runtime.js';
 
 const __MESSAGE_SCHEMA: SchemaIr = {
   "messages": [
+    {
+      "key": 4,
+      "name": "Legacy",
+      "doc": "Reserved placeholders: laid out and encoded from the struct, but hidden from the Reader API\nand reset to `Default` by `to_owned()`.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "u32",
+          "since": 1,
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "old_flag",
+          "type": "bool",
+          "since": 1,
+          "reserved": true,
+          "offset": 4,
+          "size": 1
+        },
+        {
+          "name": "old_name",
+          "type": "string",
+          "since": 1,
+          "reserved": true,
+          "offset": 8,
+          "size": 8,
+          "slot": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "since": 1,
+          "offset": 16,
+          "size": 8,
+          "slot": true
+        }
+      ],
+      "layout": {
+        "bitmapLen": 0,
+        "fixedLen": 24,
+        "maxAlign": 4
+      }
+    },
     {
       "key": 3,
       "name": "Node",
@@ -79,6 +123,55 @@ const __MESSAGE_SCHEMA: SchemaIr = {
       "layout": {
         "bitmapLen": 4,
         "fixedLen": 24,
+        "maxAlign": 4
+      }
+    },
+    {
+      "key": 5,
+      "name": "Tally",
+      "doc": "Enum-keyed map (entries sorted by enum value) and array-valued map.",
+      "fields": [
+        {
+          "name": "usage",
+          "type": {
+            "map": {
+              "key": {
+                "enum": "Color"
+              },
+              "value": "u32"
+            }
+          },
+          "since": 1,
+          "offset": 0,
+          "size": 8,
+          "slot": true,
+          "elementSize": 8,
+          "mapValueOffset": 4
+        },
+        {
+          "name": "labels",
+          "type": {
+            "map": {
+              "key": "string",
+              "value": {
+                "array": {
+                  "elem": "string",
+                  "fixed": null
+                }
+              }
+            }
+          },
+          "since": 1,
+          "offset": 8,
+          "size": 8,
+          "slot": true,
+          "elementSize": 16,
+          "mapValueOffset": 8
+        }
+      ],
+      "layout": {
+        "bitmapLen": 0,
+        "fixedLen": 16,
         "maxAlign": 4
       }
     },
@@ -383,10 +476,67 @@ export enum Color {
   Blue = 2,
 }
 
+export class LegacyReader {
+  static readonly KEY = 4;
+  static readonly FIXED_LEN = 24;
+  static readonly EXT_VERSIONS: readonly number[] = [];
+  static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
+
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+
+  static decode(buf: Uint8Array): LegacyReader | null {
+    if (buf.length < 8 + 24) return null;
+    const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (full.getUint32(0, true) !== LegacyReader.KEY) return null;
+    const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
+    return new LegacyReader(payload, 0, full.getUint8(6));
+  }
+
+  get id(): number {
+    return readU32(this.dv, this.origin + 0);
+  }
+  get note(): string {
+    { const [o, l] = readSlot(this.dv, this.origin + 16); return utf8(this.dv, o, l); }
+  }
+
+  toUser(): Legacy {
+    return {
+      id: this.id,
+      note: this.note,
+    };
+  }
+}
+
+export interface Legacy {
+  id: number;
+  note: string;
+}
+
+export namespace Legacy {
+  export function decode(buf: Uint8Array): LegacyReader | null {
+    return LegacyReader.decode(buf);
+  }
+  export function fromReader(r: LegacyReader): Legacy {
+    return r.toUser();
+  }
+  export function fromBytes(buf: Uint8Array): Legacy | null {
+    const r = LegacyReader.decode(buf);
+    return r === null ? null : r.toUser();
+  }
+  /** Strictly check an untrusted buffer; after null no getter can throw. */
+  export function validate(buf: Uint8Array): ValidationError | null {
+    return validateMessage(__MESSAGE_SCHEMA, 'Legacy', buf);
+  }
+  export function encode(value: Legacy): Uint8Array {
+    return encodeMessage(__MESSAGE_SCHEMA, 'Legacy', value as unknown as Record<string, unknown>);
+  }
+}
+
 export class NodeReader {
   static readonly KEY = 3;
   static readonly FIXED_LEN = 12;
   static readonly EXT_VERSIONS: readonly number[] = [];
+  static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
   constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
 
@@ -429,6 +579,10 @@ export namespace Node {
     const r = NodeReader.decode(buf);
     return r === null ? null : r.toUser();
   }
+  /** Strictly check an untrusted buffer; after null no getter can throw. */
+  export function validate(buf: Uint8Array): ValidationError | null {
+    return validateMessage(__MESSAGE_SCHEMA, 'Node', buf);
+  }
   export function encode(value: Node): Uint8Array {
     return encodeMessage(__MESSAGE_SCHEMA, 'Node', value as unknown as Record<string, unknown>);
   }
@@ -438,6 +592,7 @@ export class ProfileReader {
   static readonly KEY = 2;
   static readonly FIXED_LEN = 24;
   static readonly EXT_VERSIONS: readonly number[] = [];
+  static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
   constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
 
@@ -486,15 +641,106 @@ export namespace Profile {
     const r = ProfileReader.decode(buf);
     return r === null ? null : r.toUser();
   }
+  /** Strictly check an untrusted buffer; after null no getter can throw. */
+  export function validate(buf: Uint8Array): ValidationError | null {
+    return validateMessage(__MESSAGE_SCHEMA, 'Profile', buf);
+  }
   export function encode(value: Profile): Uint8Array {
     return encodeMessage(__MESSAGE_SCHEMA, 'Profile', value as unknown as Record<string, unknown>);
   }
 }
 
+export class TallyReader {
+  static readonly KEY = 5;
+  static readonly FIXED_LEN = 16;
+  static readonly EXT_VERSIONS: readonly number[] = [];
+  static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
+
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+
+  static decode(buf: Uint8Array): TallyReader | null {
+    if (buf.length < 8 + 16) return null;
+    const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (full.getUint32(0, true) !== TallyReader.KEY) return null;
+    const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
+    return new TallyReader(payload, 0, full.getUint8(6));
+  }
+
+  get usage(): UsageMapView {
+    { const [o, l] = readSlot(this.dv, this.origin + 0); return new UsageMapView(this.dv, o, l); }
+  }
+  get labels(): LabelsMapView {
+    { const [o, l] = readSlot(this.dv, this.origin + 8); return new LabelsMapView(this.dv, o, l); }
+  }
+
+  toUser(): Tally {
+    return {
+      usage: (() => { const o: Record<string, number> = {}; for (let i = 0; i < this.usage.length; i++) o[this.usage.key(i)] = this.usage.value(i); return o; })(),
+      labels: (() => { const o: Record<string, string[]> = {}; for (let i = 0; i < this.labels.length; i++) o[this.labels.key(i)] = (() => { const mv = this.labels.value(i); return Array.from({ length: mv.length }, (_, i) => mv.get(i)); })(); return o; })(),
+    };
+  }
+}
+
+export interface Tally {
+  usage: Record<string, number>;
+  labels: Record<string, string[]>;
+}
+
+export namespace Tally {
+  export function decode(buf: Uint8Array): TallyReader | null {
+    return TallyReader.decode(buf);
+  }
+  export function fromReader(r: TallyReader): Tally {
+    return r.toUser();
+  }
+  export function fromBytes(buf: Uint8Array): Tally | null {
+    const r = TallyReader.decode(buf);
+    return r === null ? null : r.toUser();
+  }
+  /** Strictly check an untrusted buffer; after null no getter can throw. */
+  export function validate(buf: Uint8Array): ValidationError | null {
+    return validateMessage(__MESSAGE_SCHEMA, 'Tally', buf);
+  }
+  export function encode(value: Tally): Uint8Array {
+    return encodeMessage(__MESSAGE_SCHEMA, 'Tally', value as unknown as Record<string, unknown>);
+  }
+}
+
+export class UsageMapView {
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {}
+  get length(): number { return this.count; }
+  key(i: number): Color {
+    const e = this.start + i * 8;
+    return readI32(this.dv, e) as Color;
+  }
+  value(i: number): number {
+    const e = this.start + i * 8 + 4;
+    return readU32(this.dv, e);
+  }
+  entry(i: number): [Color, number] { return [this.key(i), this.value(i)]; }
+}
+
+
+export class LabelsMapView {
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {}
+  get length(): number { return this.count; }
+  key(i: number): string {
+    const e = this.start + i * 16;
+    const [o, l] = readSlot(this.dv, e); return utf8(this.dv, o, l);
+  }
+  value(i: number): StringListView {
+    const e = this.start + i * 16 + 8;
+    const [o, l] = readSlot(this.dv, e); return new StringListView(this.dv, o, l);
+  }
+  entry(i: number): [string, StringListView] { return [this.key(i), this.value(i)]; }
+}
+
+
 export class UserReader {
   static readonly KEY = 1;
   static readonly FIXED_LEN = 168;
   static readonly EXT_VERSIONS: readonly number[] = [2, 3];
+  static readonly EXT_FIXED: Readonly<Record<number, number>> = { 2: 24, 3: 16 };
 
   constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
 
@@ -569,7 +815,7 @@ export class UserReader {
     return readU64Big(this.dv, this.origin + 160);
   }
   get email(): string | null {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 2);
+    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 2, UserReader.EXT_FIXED[2]);
     if (bs === null) return null;
     {
       const __origin = bs;
@@ -577,7 +823,7 @@ export class UserReader {
     }
   }
   get score(): number {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 2);
+    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 2, UserReader.EXT_FIXED[2]);
     if (bs === null) { return 0; }
     {
       const __origin = bs;
@@ -585,7 +831,7 @@ export class UserReader {
     }
   }
   get tags2(): StringListView {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 3);
+    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 3, UserReader.EXT_FIXED[3]);
     if (bs === null) { return new StringListView(this.dv, 0, 0); }
     {
       const __origin = bs;
@@ -593,7 +839,7 @@ export class UserReader {
     }
   }
   get vip(): boolean | null {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 3);
+    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 3, UserReader.EXT_FIXED[3]);
     if (bs === null) return null;
     {
       const __origin = bs;
@@ -669,6 +915,10 @@ export namespace User {
     const r = UserReader.decode(buf);
     return r === null ? null : r.toUser();
   }
+  /** Strictly check an untrusted buffer; after null no getter can throw. */
+  export function validate(buf: Uint8Array): ValidationError | null {
+    return validateMessage(__MESSAGE_SCHEMA, 'User', buf);
+  }
   export function encode(value: User): Uint8Array {
     return encodeMessage(__MESSAGE_SCHEMA, 'User', value as unknown as Record<string, unknown>);
   }
@@ -709,8 +959,10 @@ export function decodeBy(buf: Uint8Array) {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const key = dv.getUint32(0, true);
   switch (key) {
+    case 4: return LegacyReader.decode(buf);
     case 3: return NodeReader.decode(buf);
     case 2: return ProfileReader.decode(buf);
+    case 5: return TallyReader.decode(buf);
     case 1: return UserReader.decode(buf);
     default: return null;
   }

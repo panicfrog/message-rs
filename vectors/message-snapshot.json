@@ -1,6 +1,50 @@
 {
   "messages": [
     {
+      "key": 4,
+      "name": "Legacy",
+      "doc": "Reserved placeholders: laid out and encoded from the struct, but hidden from the Reader API\nand reset to `Default` by `to_owned()`.",
+      "fields": [
+        {
+          "name": "id",
+          "type": "u32",
+          "since": 1,
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "old_flag",
+          "type": "bool",
+          "since": 1,
+          "reserved": true,
+          "offset": 4,
+          "size": 1
+        },
+        {
+          "name": "old_name",
+          "type": "string",
+          "since": 1,
+          "reserved": true,
+          "offset": 8,
+          "size": 8,
+          "slot": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "since": 1,
+          "offset": 16,
+          "size": 8,
+          "slot": true
+        }
+      ],
+      "layout": {
+        "bitmapLen": 0,
+        "fixedLen": 24,
+        "maxAlign": 4
+      }
+    },
+    {
       "key": 3,
       "name": "Node",
       "doc": "Recursion through a dynamic array.",
@@ -69,6 +113,55 @@
       "layout": {
         "bitmapLen": 4,
         "fixedLen": 24,
+        "maxAlign": 4
+      }
+    },
+    {
+      "key": 5,
+      "name": "Tally",
+      "doc": "Enum-keyed map (entries sorted by enum value) and array-valued map.",
+      "fields": [
+        {
+          "name": "usage",
+          "type": {
+            "map": {
+              "key": {
+                "enum": "Color"
+              },
+              "value": "u32"
+            }
+          },
+          "since": 1,
+          "offset": 0,
+          "size": 8,
+          "slot": true,
+          "elementSize": 8,
+          "mapValueOffset": 4
+        },
+        {
+          "name": "labels",
+          "type": {
+            "map": {
+              "key": "string",
+              "value": {
+                "array": {
+                  "elem": "string",
+                  "fixed": null
+                }
+              }
+            }
+          },
+          "since": 1,
+          "offset": 8,
+          "size": 8,
+          "slot": true,
+          "elementSize": 16,
+          "mapValueOffset": 8
+        }
+      ],
+      "layout": {
+        "bitmapLen": 0,
+        "fixedLen": 16,
         "maxAlign": 4
       }
     },

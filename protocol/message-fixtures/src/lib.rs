@@ -2,7 +2,7 @@
 
 use message_derive::{Message, MessageEnum};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, MessageEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, MessageEnum)]
 pub enum Color {
     Red,
     Green,
@@ -24,6 +24,38 @@ pub struct Profile {
 pub struct Node {
     pub value: u32,
     pub children: Vec<Node>,
+}
+
+/// Reserved placeholders: laid out and encoded from the struct, but hidden from the Reader API
+/// and reset to `Default` by `to_owned()`.
+#[derive(Debug, Clone, PartialEq, Message)]
+#[msg(key = 0x0004)]
+pub struct Legacy {
+    pub id: u32,
+    #[msg(reserved)]
+    pub old_flag: bool,
+    #[msg(reserved)]
+    pub old_name: String,
+    pub note: String,
+}
+
+/// Enum-keyed map (entries sorted by enum value) and array-valued map.
+#[derive(Debug, Clone, PartialEq, Message)]
+#[msg(key = 0x0005)]
+pub struct Tally {
+    pub usage: std::collections::HashMap<Color, u32>,
+    pub labels: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Sample data for [`Tally`] (shared by tests and the conformance vectors).
+pub fn sample_tally() -> Tally {
+    let mut usage = std::collections::HashMap::new();
+    usage.insert(Color::Blue, 3u32);
+    usage.insert(Color::Red, 1u32);
+    let mut labels = std::collections::HashMap::new();
+    labels.insert("a".to_string(), vec!["x".to_string(), "y".to_string()]);
+    labels.insert("b".to_string(), vec![]);
+    Tally { usage, labels }
 }
 
 /// Main fixture covering the full V1 type set.

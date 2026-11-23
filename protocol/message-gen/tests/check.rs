@@ -85,6 +85,43 @@ fn deletion_is_rejected() {
 }
 
 #[test]
+fn precise_flip_is_rejected() {
+    let old = base_set();
+    let mut flipped = base_set();
+    flipped.messages[0].fields[0].precise = true;
+    plan_schema(&mut flipped).unwrap();
+    let errs = check_evolution(&old, &flipped);
+    assert!(
+        errs.iter().any(|e| e.contains("field definition changed")),
+        "flipping precise changes number <-> bigint on the TS side and must be rejected: {errs:?}"
+    );
+    let back = check_evolution(&flipped, &old);
+    assert!(!back.is_empty(), "flipping precise back must be rejected too: {back:?}");
+}
+
+#[test]
+fn marking_a_field_reserved_passes() {
+    let old = base_set();
+    let mut reserved = base_set();
+    reserved.messages[0].fields[1].reserved = true;
+    plan_schema(&mut reserved).unwrap();
+    assert!(
+        check_evolution(&old, &reserved).is_empty(),
+        "reserving an existing field is the sanctioned deletion and must pass"
+    );
+}
+
+#[test]
+fn un_reserving_a_field_is_rejected() {
+    let mut reserved = base_set();
+    reserved.messages[0].fields[1].reserved = true;
+    plan_schema(&mut reserved).unwrap();
+    let revived = base_set();
+    let errs = check_evolution(&reserved, &revived);
+    assert!(errs.iter().any(|e| e.contains("un-reserved")), "{errs:?}");
+}
+
+#[test]
 fn message_removal_is_rejected() {
     let old = base_set();
     let mut empty = base_set();
