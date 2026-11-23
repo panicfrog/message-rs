@@ -1221,7 +1221,7 @@ fn owned_inner_expr(kind: &TyKind, base: &str, ty: &syn::Type) -> String {
         ),
         TyKind::Array { elem, fixed } => {
             let inner = owned_list_expr(base, elem, "self.payload");
-            if fixed.is_some() && !is_slot_shaped(elem) {
+            if fixed.is_some() {
                 format!(
                     "{{ let r: ::std::vec::Vec<_> = {inner}; let r: {ty_s} = r.try_into().unwrap_or_else(|_| ::core::unreachable!()); r }}"
                 )

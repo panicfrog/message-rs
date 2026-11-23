@@ -2,14 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { Tally, User, UserReader } from '../src/schema.js';
-import { encodeMessage, findExtBlock, validateMessage, type SchemaIr } from '../src/runtime.js';
+import { Legacy, Tally, User, UserReader } from '../src/schema.js';
+import { findExtBlock } from '../src/runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const vector = JSON.parse(readFileSync(path.join(root, 'vectors/user.json'), 'utf8'));
 const tallyVector = JSON.parse(readFileSync(path.join(root, 'vectors/tally.json'), 'utf8'));
-const schema: SchemaIr = JSON.parse(readFileSync(path.join(root, 'vectors/message-snapshot.json'), 'utf8'));
+
+// The committed IR snapshot is only used by the tests to locate fields; the runtime never sees it.
+interface FieldIr { name: string; offset: number; mapValueOffset?: number; elementSize?: number }
+interface MsgIr { name: string; fields: FieldIr[] }
+const snapshot: { messages: MsgIr[] } = JSON.parse(
+  readFileSync(path.join(root, 'vectors/message-snapshot.json'), 'utf8'),
+);
 
 const HEADER = 8;
 
@@ -25,8 +31,12 @@ function putU32(b: Uint8Array, pos: number, v: number): void {
 
 /** Absolute position of a base field (header included). */
 function posOf(msgName: string, field: string): number {
-  const m = schema.messages.find((x) => x.name === msgName)!;
+  const m = snapshot.messages.find((x) => x.name === msgName)!;
   return HEADER + m.fields.find((f) => f.name === field)!.offset;
+}
+
+function field(msgName: string, name: string): FieldIr {
+  return snapshot.messages.find((x) => x.name === msgName)!.fields.find((f) => f.name === name)!;
 }
 
 function user(): Uint8Array {
@@ -51,7 +61,7 @@ describe('validate: strict check of untrusted buffers', () => {
     expect(User.validate(badLen)!.reason).toMatch(/^header fixed_len mismatch/);
   });
 
-  it('reports slot bounds, utf-8 and enum values with their field path', () => {
+  it('reports slot bounds, utf-8 and enum values with their field path (camelCase, like the API)', () => {
     const oob = user();
     putU32(oob, posOf('User', 'name'), 0xffffffff);
     const e1 = User.validate(oob)!;
@@ -71,20 +81,28 @@ describe('validate: strict check of untrusted buffers', () => {
     expect(e3.reason).toBe('unknown Color value 99');
   });
 
-  it('nests the path through arrays and map values', () => {
+  it('nests the path through arrays, map values and nested arrays', () => {
     const byId = user();
-    const byIdF = schema.messages.find((m) => m.name === 'User')!.fields.find((f) => f.name === 'by_id')!;
-    const profile = schema.messages.find((m) => m.name === 'Profile')!;
+    const byIdF = field('User', 'by_id');
     const region = new DataView(byId.buffer).getUint32(posOf('User', 'by_id'), true);
-    const bioSlot = HEADER + region + byIdF.mapValueOffset! + profile.fields.find((f) => f.name === 'bio')!.offset;
+    const bioSlot = HEADER + region + byIdF.mapValueOffset! + field('Profile', 'bio').offset;
     putU32(byId, bioSlot, 0xffffffff);
-    expect(User.validate(byId)!.path).toEqual(['by_id', 0, 'bio']);
+    expect(User.validate(byId)!.path).toEqual(['byId', 0, 'bio']);
 
     const tags = user();
-    const tagsF = schema.messages.find((m) => m.name === 'User')!.fields.find((f) => f.name === 'tags')!;
     const tagsRegion = new DataView(tags.buffer).getUint32(posOf('User', 'tags'), true);
-    putU32(tags, HEADER + tagsRegion + tagsF.elementSize!, 0xffffffff);
+    putU32(tags, HEADER + tagsRegion + field('User', 'tags').elementSize!, 0xffffffff);
     expect(User.validate(tags)!.path).toEqual(['tags', 1]);
+
+    // grid[2][1] inside the nested dynamic array
+    const grid = fromHex(tallyVector.hex);
+    const payload = new DataView(grid.buffer, grid.byteOffset + HEADER, grid.byteLength - HEADER);
+    const gridRegion = payload.getUint32(posOf('Tally', 'grid') - HEADER, true);
+    const inner = payload.getUint32(gridRegion + 2 * 8, true);
+    const innerCount = payload.getUint32(gridRegion + 2 * 8 + 4, true);
+    putU32(grid, HEADER + inner + 1 * 8, 0xffffffff);
+    expect(innerCount).toBe(2);
+    expect(Tally.validate(grid)!.path).toEqual(['grid', 1]);
   });
 
   it('checks the extension chain from the tail', () => {
@@ -106,20 +124,17 @@ describe('validate: strict check of untrusted buffers', () => {
     expect(User.validate(promised.slice(0, HEADER + v3Start))!.reason).toBe(malformed);
   });
 
-  it('lets an older reader find its blocks behind a newer writer', () => {
-    const v2Schema: SchemaIr = JSON.parse(JSON.stringify(schema));
-    const u = v2Schema.messages.find((m) => m.name === 'User')!;
-    u.fields = u.fields.filter((f) => f.since <= 2);
-    u.layout.extBlocks = u.layout.extBlocks!.filter((b) => b.version <= 2);
-    expect(validateMessage(v2Schema, 'User', user())).toBeNull();
+  it('findExtBlock steps over newer blocks an older reader does not know', () => {
     const payload = new DataView(user().buffer, user().byteOffset + HEADER, user().byteLength - HEADER);
+    // an older reader (knows v2 only) reading a v3 buffer still finds its block behind v3
     expect(findExtBlock(payload, [2], 3, 2, 20)).not.toBeNull();
+    expect(findExtBlock(payload, [2], 2, 2, 20)).toBeNull();
   });
 
   it('ignores reserved fields', () => {
-    const buf = encodeMessage(schema, 'Legacy', { id: 1, note: 'n' });
-    expect(validateMessage(schema, 'Legacy', buf)).toBeNull();
+    const buf = Legacy.encode({ id: 1, note: 'n' });
+    expect(Legacy.validate(buf)).toBeNull();
     putU32(buf, posOf('Legacy', 'old_name'), 0xffffffff);
-    expect(validateMessage(schema, 'Legacy', buf)).toBeNull();
+    expect(Legacy.validate(buf)).toBeNull();
   });
 });

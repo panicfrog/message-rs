@@ -39,12 +39,15 @@ pub struct Legacy {
     pub note: String,
 }
 
-/// Enum-keyed map (entries sorted by enum value) and array-valued map.
+/// Enum-keyed map (entries sorted by enum value), array-valued map, a fixed array of strings
+/// (slot-shaped, so encoded like a dynamic array) and a nested dynamic array.
 #[derive(Debug, Clone, PartialEq, Message)]
 #[msg(key = 0x0005)]
 pub struct Tally {
     pub usage: std::collections::HashMap<Color, u32>,
     pub labels: std::collections::HashMap<String, Vec<String>>,
+    pub aliases: [String; 2],
+    pub grid: Vec<Vec<String>>,
 }
 
 /// Sample data for [`Tally`] (shared by tests and the conformance vectors).
@@ -55,7 +58,12 @@ pub fn sample_tally() -> Tally {
     let mut labels = std::collections::HashMap::new();
     labels.insert("a".to_string(), vec!["x".to_string(), "y".to_string()]);
     labels.insert("b".to_string(), vec![]);
-    Tally { usage, labels }
+    Tally {
+        usage,
+        labels,
+        aliases: ["al".to_string(), "as".to_string()],
+        grid: vec![vec!["g".to_string()], vec![], vec!["h".to_string(), "i".to_string()]],
+    }
 }
 
 /// Main fixture covering the full V1 type set.

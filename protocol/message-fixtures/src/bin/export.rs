@@ -75,6 +75,8 @@ fn export_vectors(out: &str) -> i32 {
         "expected": {
             "usage": { "0": 1u32, "2": 3u32 },
             "labels": { "a": ["x", "y"], "b": [] },
+            "aliases": ["al", "as"],
+            "grid": [["g"], [], ["h", "i"]],
         },
     });
     let tally_out = std::path::Path::new(out).with_file_name("tally.json");

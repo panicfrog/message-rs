@@ -22,6 +22,18 @@ fn enum_keyed_and_array_valued_maps_roundtrip() {
     assert_eq!(r.labels().key(1), "b");
     assert_eq!(r.labels().value(1).len(), 0);
 
+    assert_eq!(r.aliases().len(), 2);
+    assert_eq!(r.aliases().get(1), "as");
+    assert_eq!(r.grid().len(), 3);
+    let inner = |i: usize| {
+        let (o, l) = r.grid().slot_of(i);
+        message_core::StringListView::new(r.payload(), o as usize, l as usize)
+    };
+    assert_eq!(inner(0).len(), 1);
+    assert_eq!(inner(0).get(0), "g");
+    assert_eq!(inner(1).len(), 0);
+    assert_eq!(inner(2).get(1), "i");
+
     assert_eq!(r.to_owned(), t);
     assert_eq!(r.to_owned().encode(), buf, "canonical re-encode");
 }

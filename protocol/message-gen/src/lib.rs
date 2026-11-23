@@ -12,13 +12,15 @@
 //!   `./message-snapshot.json`);
 //! - `check [path]`: compare against the committed snapshot and enforce the append-only
 //!   evolution rules, exiting non-zero on violations (CI gate);
+//! - `ts <out.ts>`: generate the TypeScript schema (readers, encoders, validators with literal
+//!   offsets; the runtime needs no IR);
 //! - `ir --key <KEY>`: dump the JSON IR of a single type for debugging.
 
 use message_core::{collect_schema, set_to_json_string, SchemaSet};
 use std::path::Path;
 
 mod backend_ts;
-pub use backend_ts::{generate_ts, generate_ts_split};
+pub use backend_ts::generate_ts;
 
 pub const DEFAULT_SNAPSHOT: &str = "message-snapshot.json";
 
@@ -56,12 +58,7 @@ pub fn run(cmd: &str, args: &[String]) -> i32 {
                 .find(|a| !a.starts_with("--"))
                 .map(|s| s.as_str())
                 .unwrap_or("schema.ts");
-            let split_ir = args
-                .iter()
-                .position(|a| a == "--split-ir")
-                .and_then(|i| args.get(i + 1))
-                .map(|s| s.to_string());
-            match ts_to(path, split_ir.as_deref()) {
+            match ts_to(path) {
                 Ok(n) => {
                     println!("generated TS code ({n} message types) -> {path}");
                     0
@@ -114,7 +111,7 @@ pub fn run(cmd: &str, args: &[String]) -> i32 {
             }
         }
         other => {
-            eprintln!("unknown command `{other}` (supported: export / check / ir --key <KEY> / ts <out.ts> [--split-ir <irMod>])");
+            eprintln!("unknown command `{other}` (supported: export / check / ir --key <KEY> / ts <out.ts>)");
             2
         }
     }
@@ -127,23 +124,11 @@ pub fn export_to(path: &str) -> Result<usize, String> {
     Ok(n)
 }
 
-pub fn ts_to(path: &str, split_ir: Option<&str>) -> Result<usize, String> {
+/// Generate the TypeScript schema (readers, encoders and validators with literal offsets).
+pub fn ts_to(path: &str) -> Result<usize, String> {
     let set = collect_schema().map_err(|e| e.to_string())?;
     let n = set.messages.len();
-    let content = match split_ir {
-        Some(ir_mod) => {
-            let (schema, ir_file) = backend_ts::generate_ts_split(&set, ir_mod);
-            let ir_path = Path::new(path)
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(format!("{ir_mod}.ts"));
-            std::fs::write(&ir_path, ir_file).map_err(|e| e.to_string())?;
-            println!("IR split into {}", ir_path.display());
-            schema
-        }
-        None => backend_ts::generate_ts(&set),
-    };
-    std::fs::write(Path::new(path), content).map_err(|e| e.to_string())?;
+    std::fs::write(Path::new(path), generate_ts(&set)).map_err(|e| e.to_string())?;
     Ok(n)
 }
 

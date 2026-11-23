@@ -3,15 +3,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { Tally, TallyReader, User, UserReader } from '../src/schema.js';
-import { encodeMessage, type SchemaIr } from '../src/runtime.js';
+import { StringListView } from '../src/runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
 const vector = JSON.parse(readFileSync(path.join(root, 'vectors/user.json'), 'utf8'));
 const tallyVector = JSON.parse(readFileSync(path.join(root, 'vectors/tally.json'), 'utf8'));
-const schema: SchemaIr = JSON.parse(
-  readFileSync(path.join(root, 'vectors/message-snapshot.json'), 'utf8'),
-);
 
 function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -21,6 +18,19 @@ function fromHex(hex: string): Uint8Array {
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** The vectors carry the Rust field names; the TS object layer uses camelCase (and bigint for precise u64). */
+function toTsValue(v: unknown, precise = false): unknown {
+  if (Array.isArray(v)) return v.map((e) => toTsValue(e));
+  if (v && typeof v === 'object') {
+    const o: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      o[k.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())] = toTsValue(x, k === 'precise_id');
+    }
+    return o;
+  }
+  return precise ? BigInt(v as string) : v;
 }
 
 describe('Rust <-> TS cross-language conformance (full-type User vector)', () => {
@@ -84,8 +94,8 @@ describe('Rust <-> TS cross-language conformance (full-type User vector)', () =>
     expect(r!.vip).toBe(e.vip);
   });
 
-  it('encode: TS canonical encoding is byte-identical to Rust', () => {
-    const bytes = encodeMessage(schema, 'User', vector.expected);
+  it('encode: the generated encoder is byte-identical to Rust', () => {
+    const bytes = User.encode(toTsValue(vector.expected) as User);
     expect(toHex(bytes)).toBe(vector.hex);
   });
 
@@ -106,11 +116,23 @@ describe('Rust <-> TS cross-language conformance (full-type User vector)', () =>
     // re-encode the object; must match Rust byte for byte
     expect(toHex(User.encode(u!))).toBe(vector.hex);
   });
+
+  it('encode: nullish arrays and maps are treated as empty (lenient input)', () => {
+    const u = User.fromBytes(fromHex(vector.hex))!;
+    const sparse = { ...u, nums: null, counts: null, motto: undefined } as unknown as User;
+    const bytes = User.encode(sparse);
+    const r = UserReader.decode(bytes)!;
+    expect(r.nums.length).toBe(0);
+    expect(r.counts.length).toBe(0);
+    expect(r.motto).toBeNull();
+    expect(r.id).toBe(42);
+  });
 });
 
-describe('Rust <-> TS conformance (enum-keyed / array-valued maps)', () => {
+describe('Rust <-> TS conformance (enum-keyed / array-valued maps, fixed string arrays, nested arrays)', () => {
   it('decode: enum keys come back as the numeric value, array values as views', () => {
-    const r = TallyReader.decode(fromHex(tallyVector.hex));
+    const buf = fromHex(tallyVector.hex);
+    const r = TallyReader.decode(buf);
     expect(r).not.toBeNull();
     expect(r!.usage.length).toBe(2);
     expect(r!.usage.key(0)).toBe(0); // Color.Red
@@ -121,10 +143,17 @@ describe('Rust <-> TS conformance (enum-keyed / array-valued maps)', () => {
     expect(r!.labels.value(0).get(1)).toBe('y');
     expect(r!.labels.key(1)).toBe('b');
     expect(r!.labels.value(1).length).toBe(0);
+    expect(r!.aliases.length).toBe(2);
+    expect(r!.aliases.get(1)).toBe('as');
+    expect(r!.grid.length).toBe(3);
+    // nested dynamic array: each element is a slot pointing at an inner string-list region
+    const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
+    const [o, l] = r!.grid.slotOf(2);
+    expect(new StringListView(payload, o, l).get(1)).toBe('i');
   });
 
   it('encode: byte-identical to Rust with numeric-string enum keys', () => {
-    expect(toHex(encodeMessage(schema, 'Tally', tallyVector.expected))).toBe(tallyVector.hex);
+    expect(toHex(Tally.encode(toTsValue(tallyVector.expected) as Tally))).toBe(tallyVector.hex);
   });
 
   it('object layer: roundtrip is byte-identical; variant names are accepted as enum keys', () => {
@@ -132,8 +161,10 @@ describe('Rust <-> TS conformance (enum-keyed / array-valued maps)', () => {
     expect(t).not.toBeNull();
     expect(t!.usage).toEqual({ '0': 1, '2': 3 });
     expect(t!.labels).toEqual({ a: ['x', 'y'], b: [] });
+    expect(t!.aliases).toEqual(['al', 'as']);
+    expect(t!.grid).toEqual([['g'], [], ['h', 'i']]);
     expect(toHex(Tally.encode(t!))).toBe(tallyVector.hex);
-    const byName = { usage: { Red: 1, Blue: 3 }, labels: { a: ['x', 'y'], b: [] } } as unknown as Tally;
+    const byName = { ...t!, usage: { Red: 1, Blue: 3 } } as Tally;
     expect(toHex(Tally.encode(byName))).toBe(tallyVector.hex);
   });
 });

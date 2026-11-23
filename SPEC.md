@@ -11,11 +11,12 @@ this file wins.
 | Core | `protocol/message-core` | IR data model (`SchemaSet`, `MessageDescriptor`), pure layout planner, read primitives, validation primitives, trait contracts |
 | Derive | `protocol/message-derive` | `#[derive(Message)]` / `#[derive(MessageEnum)]`: compile-time layout constants, `encode`, zero-copy `Reader`, `validate`, descriptor registration |
 | Gen | `protocol/message-gen` | `export` (JSON IR snapshot), `check` (evolution gate), `ts` (TypeScript backend) |
-| TS runtime | `runtime/ts` | Zero-dependency runtime (Hermes / Web / Node): views, IR-driven encoder, validator |
+| TS runtime | `runtime/ts` | Zero-dependency runtime (Hermes / Web / Node): read primitives, views, `Writer`, validation primitives. Schema-free |
 
-Every backend consumes the same IR (the derive-computed descriptor). The layout planner in core
+Every backend consumes the same IR (the derive-computed descriptor) at build time and emits code
+with literal offsets; the IR itself is not shipped to the runtime. The layout planner in core
 recomputes the layout from the IR and the fixtures assert that both agree field by field
-(`check_consistency`); layout is never recomputed by a backend.
+(`check_consistency`); layout is never recomputed by a consumer.
 
 ## 2. Envelope
 
@@ -203,13 +204,26 @@ that slots point into their own block's var region.
 
 ## 9. TypeScript API
 
-Each message gets three things in `schema.ts`:
+`schema.ts` is fully generated with literal offsets; the runtime (`runtime.ts`) holds only the
+read/write primitives, the views, the `Writer` buffer and the validation helpers, and knows
+nothing about any schema. Each message gets:
 
 - `XxxReader`: zero-copy view with lazy getters (`r.tags.get(1)`, `r.byId.key(0)`); `decode(buf)`
   returns `null` only for a short buffer or a key mismatch;
 - `Xxx`: plain object interface (`string[]`, `Record<string, T>`, `bigint` for precise);
-- `namespace Xxx`: `decode`, `fromReader`, `toUser` via `fromReader`, `fromBytes`, `encode`, `validate`.
+- `namespace Xxx`: `decode`, `fromReader`, `fromBytes`, `validate`, `encode`.
+
+`encode(value)` is straight-line generated code (no schema walk): it reads the camelCase
+properties of `value`, reserves regions with literal sizes, writes scalars through `Writer`'s
+little-endian methods and back-patches slots; enum fields accept the number or a variant name.
+`null` / `undefined` arrays and maps encode as empty (same as before); optional fields use the
+bitmap. The `Writer` is a growable `Uint8Array` (doubling), and floats go through one reused
+scratch `DataView`.
 
 Map keys are strings on the object layer: scalars are stringified, enum keys are the **numeric
 value** as a string (`{ "0": 1 }`), which is what decode produces; `encode` also accepts variant
-names. Array-valued maps materialize as `Record<string, T[]>`.
+names. Keys are resolved to their wire value (or `BigInt` for 64-bit keys) before sorting, so the
+entry order matches Rust. Array-valued maps materialize as `Record<string, T[]>`.
+
+Validation paths use the camelCase field names (`['byId', 0, 'bio']`), mirroring the API rather
+than the Rust names.
