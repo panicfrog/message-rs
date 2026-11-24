@@ -80,13 +80,21 @@ impl Hub {
 }
 ```
 
-`value.rs` (already written) provides `ValueKind`, `Value` and `encode`/`decode` with
-length/UTF-8 validation for basic kinds; `Message` bytes pass through untouched.
+`hub/src/value.rs` (to write) — the value codec module:
+
+- `ValueKind`: `Copy`, `#[repr(u8)]`, stable discriminants per section 2, plus `from_u8(u8)`
+  and `fixed_len() -> Option<usize>` (fixed-size kinds only);
+- `Value`: one variant per kind (`Bool(bool)` … `F64(f64)`, `String(String)`, `Bytes(Vec<u8>)`,
+  `Message(Vec<u8>)`), with `kind()` and `encode() -> Vec<u8>` (little-endian scalars, raw
+  UTF-8 / raw bytes, `Message` passthrough);
+- `decode(kind, &[u8]) -> Result<Value, ValueError>`: fixed-size kinds reject wrong lengths,
+  `String` rejects invalid UTF-8, `Bytes` / `Message` pass through; `ValueError(&'static str)`.
 
 ## 6. Milestones
 
-- **M1 (current)** — Rust core: `hub/src/value.rs` (done), `hub/src/lib.rs` (`Hub`,
-  `Subscription`, `Scheduler`; TODO), `hub/tests/hub.rs` (TODO), add `hub` to workspace members.
+- **M1 (current)** — Rust core, all to write: `hub/Cargo.toml` (crate `message-hub`, zero
+  dependencies), `hub/src/value.rs` (section 5), `hub/src/lib.rs` (`Hub`, `Subscription`,
+  `Scheduler`), `hub/tests/hub.rs` (section 7), and add `hub` to the root workspace members.
 - **M2** — C-ABI surface (`hub_ffi.rs`, cdylib): opaque handles,
   `hub_publish(h, id, kind_u8, ptr, len)`, `hub_subscribe(h, id, trampoline(ctx, id, kind, ptr,
   len), ctx, ctx_drop)`, `hub_get` + buffer release, `hub_set_scheduler(fn, ctx)`; round-trip
@@ -118,7 +126,8 @@ length/UTF-8 validation for basic kinds; `Message` bytes pass through untouched.
 
 ## 8. State on disk (for the next device)
 
-- `hub/Cargo.toml`, `hub/src/value.rs` — written (uncommitted at the time of this note).
-- `hub/src/lib.rs`, `hub/tests/hub.rs` — not started.
+- Nothing under `hub/` except this document: no code exists yet, start from M1. (An initial
+  `value.rs` sketch was removed again so this branch carries the plan only; sections 2 and 5
+  fully specify it.)
 - Root `Cargo.toml` workspace `members` does not include `hub` yet.
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.
