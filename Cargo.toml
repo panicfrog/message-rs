@@ -6,6 +6,7 @@ members = [
     "protocol/message-gen",
     "protocol/message-fixtures",
     "protocol/playground",
+    "hub",
 ]
 
 [workspace.package]

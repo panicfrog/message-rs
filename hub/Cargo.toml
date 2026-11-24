@@ -1,0 +1,8 @@
+[package]
+name = "message-hub"
+description = "In-process pub/sub data layer shared by every end of message-rs (Rust core, zero dependencies)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

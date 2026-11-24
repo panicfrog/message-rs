@@ -14,6 +14,7 @@ protocol/
 runtime/ts/         zero-dependency TS runtime + generated schema.ts
 runtime/swift/      SwiftPM package: MessageRuntime + generated Schema.swift + conformance tests
 runtime/kotlin/     Gradle project: message-runtime + generated Schema.kt + conformance tests
+hub/                message-hub: in-process pub/sub data layer embedded by every end (hub/DESIGN.md)
 vectors/            committed IR snapshot and conformance vectors (generated)
 ```
 
