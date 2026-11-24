@@ -1,12 +1,13 @@
 //! The M1 test list of `DESIGN.md` section 7, in order.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use message_hub::{
-    Callback, DataId, Event, Hub, Publisher, Subscription, Value, ValueError, ValueKind,
+    Callback, DataId, Event, Hub, Publisher, Scheduler, Subscription, Value, ValueError, ValueKind,
 };
 
 /// One recorded delivery: `(id, Some((kind, bytes)))`, or `(id, None)` for `Closed`.
@@ -33,7 +34,7 @@ fn sink() -> (Callback, Receiver) {
 }
 
 /// Blocks for exactly `n` deliveries; a missing one fails the test instead of hanging.
-fn take(rx: &Receiver, n: usize) -> Vec<Item> {
+fn take<T>(rx: &mpsc::Receiver<T>, n: usize) -> Vec<T> {
     (0..n)
         .map(|_| rx.recv_timeout(Duration::from_secs(5)).expect("delivery"))
         .collect()
@@ -267,39 +268,99 @@ fn concurrent_use_has_no_deadlock_and_delivers_everything() {
     drop(subs);
 }
 
+/// A one-thread executor: `scheduler()` hands jobs to its thread. Drop every subscription
+/// holding one of its schedulers before `finish()`, or the thread never sees the channel close.
+struct Executor {
+    id: thread::ThreadId,
+    tx: Arc<Mutex<mpsc::Sender<Job>>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+impl Executor {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let handle = thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                job();
+            }
+        });
+        Executor {
+            id: handle.thread().id(),
+            tx: Arc::new(Mutex::new(tx)),
+            handle: Some(handle),
+        }
+    }
+
+    fn scheduler(&self) -> Scheduler {
+        let tx = Arc::clone(&self.tx);
+        Arc::new(move |job: Job| tx.lock().unwrap().send(job).unwrap())
+    }
+
+    fn finish(mut self) {
+        let handle = self.handle.take().unwrap();
+        drop(self.tx);
+        handle.join().unwrap();
+    }
+}
+
 #[test]
-fn scheduler_mode_runs_callbacks_on_the_executor() {
+fn subscribe_on_runs_each_subscriber_on_its_own_executor() {
     let hub = Hub::new();
     let p = hub.publisher(1, ValueKind::U8);
+    let a = Executor::new();
+    let b = Executor::new();
 
-    // a one-thread executor: the scheduler hands it boxed jobs
-    let (job_tx, job_rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
-    let job_tx = Arc::new(Mutex::new(job_tx));
-    let executor = thread::spawn(move || {
-        while let Ok(job) = job_rx.recv() {
-            job()
-        }
+    // every delivery records the thread it ran on
+    let (tx, rx) = mpsc::channel::<(thread::ThreadId, Item)>();
+    let tx = Mutex::new(tx);
+    let record: Callback = Arc::new(move |id, ev| {
+        tx.lock()
+            .unwrap()
+            .send((thread::current().id(), item(id, ev)))
+            .unwrap();
     });
-    let tx_in_scheduler = Arc::clone(&job_tx);
-    hub.set_scheduler(Some(Arc::new(move |job: Box<dyn FnOnce() + Send>| {
-        tx_in_scheduler.lock().unwrap().send(job).unwrap();
-    })));
+    let _sa = hub.subscribe_on(1, Arc::clone(&record), a.scheduler());
+    let _sb = hub.subscribe_on(1, Arc::clone(&record), b.scheduler());
+    let _inline = hub.subscribe(1, Arc::clone(&record));
 
-    let (cb, rx) = sink();
-    let _s = hub.subscribe(1, cb);
+    let by_thread = |n: usize| {
+        let mut seen: HashMap<thread::ThreadId, Vec<Item>> = HashMap::new();
+        for (t, it) in take(&rx, n) {
+            seen.entry(t).or_default().push(it);
+        }
+        seen
+    };
     let on_publisher = thread::current().id();
+
     p.publish(&[5]);
     assert_eq!(
         hub.get(1).unwrap().1.as_ref(),
         [5],
         "the value is recorded synchronously"
     );
-    assert_eq!(take(&rx, 1), [value(1, ValueKind::U8, &[5])]);
-    assert_ne!(on_publisher, executor.thread().id());
+    let seen = by_thread(3);
+    assert_eq!(
+        seen.len(),
+        3,
+        "one delivery per subscriber, each on its own thread"
+    );
+    for t in [&a.id, &b.id, &on_publisher] {
+        assert_eq!(seen[t], [value(1, ValueKind::U8, &[5])]);
+    }
 
-    hub.set_scheduler(None);
-    drop(job_tx);
-    executor.join().unwrap();
+    // Closed follows each subscriber's executor too
+    drop(p);
+    let seen = by_thread(3);
+    assert_eq!(seen.len(), 3);
+    for t in [&a.id, &b.id, &on_publisher] {
+        assert_eq!(seen[t], [(1, None)]);
+    }
+
+    drop((_sa, _sb, _inline));
+    a.finish();
+    b.finish();
 }
 
 #[test]
@@ -507,5 +568,23 @@ fn subscriptions_survive_closed_and_reach_a_new_publisher() {
             (1, None),
             value(1, ValueKind::U8, &[2])
         ]
+    );
+}
+
+#[test]
+fn shared_is_one_registry_per_process() {
+    // the only test touching the shared hub, so an id of its own keeps it independent
+    const ID: DataId = 0x51A2B;
+    assert!(std::ptr::eq(Hub::shared(), Hub::shared()));
+    let (cb, rx) = sink();
+    let _s = Hub::shared().subscribe(ID, cb);
+    let p = Hub::shared().publisher(ID, ValueKind::U8);
+    p.publish(&[1]);
+    assert_eq!(take(&rx, 1), [value(ID, ValueKind::U8, &[1])]);
+    assert_eq!(Hub::shared().get(ID).unwrap().1.as_ref(), [1]);
+    assert_eq!(
+        Hub::new().get(ID),
+        None,
+        "a fresh hub is an isolated registry"
     );
 }

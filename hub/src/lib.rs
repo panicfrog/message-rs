@@ -5,7 +5,7 @@ mod value;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 pub use value::{Value, ValueError, ValueKind};
 
@@ -20,7 +20,7 @@ pub enum Event<'a> {
 
 pub type Callback = Arc<dyn Fn(DataId, Event<'_>) + Send + Sync>;
 
-/// Runs jobs on the platform's own loop; with none, jobs run on the publisher's thread.
+/// Runs a `subscribe_on` subscriber's jobs on its own loop.
 pub type Scheduler = Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>;
 
 /// The registry. Clones share it.
@@ -52,7 +52,6 @@ struct State {
     ids: HashMap<DataId, Entry>,
     seq: u64,
     next_token: u64,
-    scheduler: Option<Scheduler>,
 }
 
 #[derive(Default)]
@@ -62,10 +61,11 @@ struct Entry {
 }
 
 /// Shared with the `Subscription` handle, so a delivery can skip an unsubscribed callback
-/// without the registry lock.
+/// without the registry lock. `scheduler` is per subscriber: one hub serves several loops.
 struct SubState {
     cb: Callback,
     alive: AtomicBool,
+    scheduler: Option<Scheduler>,
 }
 
 /// One live publisher as the registry sees it; `seq` is the stamp of its last publish.
@@ -97,10 +97,15 @@ impl Hub {
                     ids: HashMap::new(),
                     seq: 0,
                     next_token: 0,
-                    scheduler: None,
                 }),
             }),
         }
+    }
+
+    /// The one registry every end of a process shares; `new()` is for isolated registries.
+    pub fn shared() -> &'static Hub {
+        static SHARED: OnceLock<Hub> = OnceLock::new();
+        SHARED.get_or_init(Hub::new)
     }
 
     pub fn publisher(&self, id: DataId, kind: ValueKind) -> Publisher {
@@ -124,10 +129,26 @@ impl Hub {
         }
     }
 
+    /// Deliveries run inline on the publisher's thread.
     pub fn subscribe(&self, id: DataId, cb: Callback) -> Subscription {
+        self.subscribe_inner(id, cb, None)
+    }
+
+    /// Like `subscribe`, but every delivery is handed to `s` as a job instead of running inline.
+    pub fn subscribe_on(&self, id: DataId, cb: Callback, s: Scheduler) -> Subscription {
+        self.subscribe_inner(id, cb, Some(s))
+    }
+
+    fn subscribe_inner(
+        &self,
+        id: DataId,
+        cb: Callback,
+        scheduler: Option<Scheduler>,
+    ) -> Subscription {
         let sub = Arc::new(SubState {
             cb,
             alive: AtomicBool::new(true),
+            scheduler,
         });
         self.inner
             .lock()
@@ -156,10 +177,6 @@ impl Hub {
         Some((kind, Arc::clone(last)))
     }
 
-    pub fn set_scheduler(&self, s: Option<Scheduler>) {
-        self.inner.lock().scheduler = s;
-    }
-
     pub fn get_value(&self, id: DataId) -> Option<Result<Value, ValueError>> {
         self.get(id)
             .map(|(kind, bytes)| Value::decode(kind, &bytes))
@@ -173,16 +190,16 @@ impl Inner {
 
     /// Subscriber snapshot for `id`, taken under a lock the caller already holds so that it is
     /// atomic with the registry update that caused the delivery.
-    fn snapshot(st: &State, id: DataId) -> (Vec<Arc<SubState>>, Option<Scheduler>) {
-        let subs = st.ids.get(&id).map(|e| e.subs.clone()).unwrap_or_default();
-        (subs, st.scheduler.clone())
+    fn snapshot(st: &State, id: DataId) -> Vec<Arc<SubState>> {
+        st.ids.get(&id).map(|e| e.subs.clone()).unwrap_or_default()
     }
 }
 
-/// Deliver to a snapshot outside the lock: inline, or as one job per subscriber through the
+/// Deliver to a snapshot outside the lock: inline, or as one job per subscriber through its own
 /// scheduler. Subscribers unsubscribed before their delivery runs are skipped.
-fn dispatch(id: DataId, subs: Vec<Arc<SubState>>, scheduler: Option<Scheduler>, d: Delivery) {
+fn dispatch(id: DataId, subs: Vec<Arc<SubState>>, d: Delivery) {
     for sub in subs {
+        let scheduler = sub.scheduler.clone();
         let job: Box<dyn FnOnce() + Send> = {
             let d = d.clone();
             Box::new(move || {
@@ -197,7 +214,7 @@ fn dispatch(id: DataId, subs: Vec<Arc<SubState>>, scheduler: Option<Scheduler>, 
                 }
             })
         };
-        match scheduler.as_ref() {
+        match scheduler {
             Some(s) => s(job),
             None => job(),
         }
@@ -218,7 +235,7 @@ impl Publisher {
             return;
         };
         let bytes: Arc<[u8]> = Arc::from(payload);
-        let (subs, scheduler) = {
+        let subs = {
             let mut guard = inner.lock();
             let st = &mut *guard;
             let Some(rec) = st
@@ -233,7 +250,7 @@ impl Publisher {
             rec.last = Some(Arc::clone(&bytes));
             Inner::snapshot(st, self.id)
         };
-        dispatch(self.id, subs, scheduler, Delivery::Value(self.kind, bytes));
+        dispatch(self.id, subs, Delivery::Value(self.kind, bytes));
     }
 
     pub fn publish_value(&self, v: &Value) -> Result<(), ValueError> {
@@ -259,14 +276,14 @@ impl Publisher {
         if !e.pubs.is_empty() {
             return;
         }
-        let (subs, scheduler) = if e.subs.is_empty() {
+        let subs = if e.subs.is_empty() {
             st.ids.remove(&self.id);
-            (Vec::new(), None)
+            Vec::new()
         } else {
             Inner::snapshot(&st, self.id)
         };
         drop(st);
-        dispatch(self.id, subs, scheduler, Delivery::Closed);
+        dispatch(self.id, subs, Delivery::Closed);
     }
 }
 
