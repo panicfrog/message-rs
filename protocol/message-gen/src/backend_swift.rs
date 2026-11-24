@@ -29,6 +29,16 @@ fn line(out: &mut String, level: usize, s: &str) {
     let _ = writeln!(out, "{}{s}", "  ".repeat(level));
 }
 
+/// Whether struct `name` has extension blocks: containers of it are then written in instance
+/// mode (per-element / per-value slots, shape bit set).
+fn has_ext(set: &SchemaSet, name: &str) -> bool {
+    set.message(name).is_some_and(|m| !m.layout.ext_blocks.is_empty())
+}
+
+fn fixed_len_of(set: &SchemaSet, name: &str) -> usize {
+    set.message(name).map(|m| m.layout.fixed_len).expect("planned struct")
+}
+
 fn camel(s: &str) -> String {
     let mut out = String::new();
     let mut upper = false;
@@ -171,7 +181,7 @@ fn view_ty(elem: &Type) -> String {
         Type::Simple(SimpleType::Bytes) => "BytesListView".into(),
         Type::Simple(s) => format!("ScalarListView<{}>", swift_scalar(*s)),
         Type::Enum { name } => format!("ScalarListView<{name}>"),
-        Type::Struct { name } => format!("StructListView<{name}Reader>"),
+        Type::Struct { name } => format!("StructEvoListView<{name}Reader>"),
         Type::Array { .. } => "SlotListView".into(),
         Type::Map { .. } => unreachable!("maps cannot be array elements"),
     }
@@ -199,7 +209,7 @@ fn write_enum(out: &mut String, e: &EnumDescriptor) {
 // ---------- Reader ----------
 
 /// View construction over elements of `elem` at `start` with `count` elements.
-fn view_ctor(elem: &Type, start: &str, count: &str, set: &SchemaSet) -> String {
+fn view_ctor(elem: &Type, start: &str, count: &str, _set: &SchemaSet) -> String {
     match elem {
         Type::Simple(SimpleType::String) => format!("StringListView(msg: msg, start: {start}, count: {count})"),
         Type::Simple(SimpleType::Bytes) => format!("BytesListView(msg: msg, start: {start}, count: {count})"),
@@ -209,10 +219,8 @@ fn view_ctor(elem: &Type, start: &str, count: &str, set: &SchemaSet) -> String {
             s.fixed_size()
         ),
         Type::Enum { name } => format!("ScalarListView<{name}>(msg: msg, start: {start}, count: {count}, stride: 4)"),
-        Type::Struct { name } => format!(
-            "StructListView<{name}Reader>(msg: msg, start: {start}, count: {count}, stride: {})",
-            element_size(elem, set).expect("element size of a planned schema")
-        ),
+        // `count` is the raw slot length here: the shape bit selects open vs instance elements
+        Type::Struct { name } => format!("StructEvoListView<{name}Reader>(msg: msg, start: {start}, rawLen: UInt32({count}))"),
         Type::Array { .. } => format!("SlotListView(msg: msg, start: {start}, count: {count})"),
         Type::Map { .. } => unreachable!("maps cannot be array elements"),
     }
@@ -230,7 +238,10 @@ fn read_expr_hv(ty: &Type, pos: &str, hv: &str, set: &SchemaSet) -> String {
         Type::Simple(SimpleType::Bytes) => format!("msg.readBytes({pos})"),
         Type::Simple(s) => format!("msg.read{}({pos})", swift_read_fn(*s)),
         Type::Enum { name } => format!("{name}(rawValue: msg.readI32({pos}))!"),
-        Type::Struct { name } => format!("{name}Reader(msg: msg, origin: {pos}, hv: {hv})"),
+        Type::Struct { name } => {
+            let _ = hv;
+            format!("{{ let (o, l) = msg.readSlot({pos}); return {name}Reader(msg: msg, origin: Int(o), end: Int(o) + Int(l), hv: INSTANCE_HV) }}()")
+        }
         Type::Array { body } => {
             if body.fixed.is_some() && !body.elem.is_slot_shaped() {
                 view_ctor(&body.elem, pos, &body.fixed.unwrap().to_string(), set)
@@ -257,7 +268,7 @@ fn reader_ret_ty(f: &FieldDescriptor) -> String {
 fn read_field_expr(f: &FieldDescriptor, pos: &str, set: &SchemaSet) -> String {
     match &f.ty {
         Type::Map { .. } => format!(
-            "{{ let (o, l) = msg.readSlot({pos}); return {}MapView(msg: msg, start: Int(o), count: Int(l)) }}()",
+            "{{ let (o, l) = msg.readSlot({pos}); return {}MapView(msg: msg, start: Int(o), rawLen: l) }}()",
             pascal(&f.name)
         ),
         ty => read_expr(ty, pos, set),
@@ -275,7 +286,7 @@ fn default_expr(ty: &Type, field: &str, set: &SchemaSet) -> String {
             format!("fatalError(\"field `{field}` missing: data written by an older schema version\")")
         }
         Type::Array { body } => view_ctor(&body.elem, "0", "0", set),
-        Type::Map { .. } => format!("{}MapView(msg: msg, start: 0, count: 0)", pascal(field)),
+        Type::Map { .. } => format!("{}MapView(msg: msg, start: 0, rawLen: 0)", pascal(field)),
     }
 }
 
@@ -326,11 +337,14 @@ fn write_reader(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     let _ = writeln!(out, "  /// The underlying buffer (payload-relative offsets); lets callers build views themselves.");
     let _ = writeln!(out, "  public let msg: RawMessage");
     let _ = writeln!(out, "  let origin: Int");
-    let _ = writeln!(out, "  /// The writer's highest extension version.");
+    let _ = writeln!(out, "  /// End of the extent this view may read (payload end, or instance end for nested structs).");
+    let _ = writeln!(out, "  let end: Int");
+    let _ = writeln!(out, "  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).");
     let _ = writeln!(out, "  public let hv: UInt8");
-    let _ = writeln!(out, "  public init(msg: RawMessage, origin: Int, hv: UInt8) {{");
+    let _ = writeln!(out, "  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {{");
     let _ = writeln!(out, "    self.msg = msg");
     let _ = writeln!(out, "    self.origin = origin");
+    let _ = writeln!(out, "    self.end = end");
     let _ = writeln!(out, "    self.hv = hv");
     let _ = writeln!(out, "  }}");
     let _ = writeln!(
@@ -339,7 +353,7 @@ fn write_reader(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     );
     let _ = writeln!(
         out,
-        "  public static func decode(_ data: Data) -> {name}Reader? {{\n    guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else {{ return nil }}\n    return {name}Reader(msg: m, origin: 0, hv: m.version)\n  }}"
+        "  public static func decode(_ data: Data) -> {name}Reader? {{\n    guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else {{ return nil }}\n    return {name}Reader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)\n  }}"
     );
 
     for f in &m.fields {
@@ -351,7 +365,7 @@ fn write_reader(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         if f.since > 1 {
             let since = f.since;
             let min_len = m.layout.ext_blocks.iter().find(|b| b.version == since).map_or(0, |b| b.fixed_len);
-            let find = format!("msg.findExtBlock(Self.EXT_VERSIONS, hv, {since}, {min_len})");
+            let find = format!("msg.findExtBlock(Self.EXT_VERSIONS, hv, {since}, {min_len}, lo: origin, hi: end)");
             if f.optional {
                 let _ = writeln!(
                     out,
@@ -413,21 +427,37 @@ fn write_map_views(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         }
         let Type::Map { body } = &f.ty else { continue };
         let view = format!("{}MapView", pascal(&f.name));
-        let stride = f.element_size.expect("planned stride");
-        let v_off = f.map_value_offset.expect("planned value offset");
+        let l = message_core::map_entry_layouts(&body.key, &body.value, set).expect("planned map");
         let key_ty = swift_reader_ty(&body.key);
         let val_ty = swift_reader_ty(&body.value);
-        let key_read = read_expr_hv(&body.key, "start + i * Self.stride", "0", set);
-        let val_read = read_expr_hv(&body.value, "start + i * Self.stride + Self.vOff", "0", set);
+        let key_read = read_expr_hv(&body.key, "start + i * stride", "0", set);
+        // Struct values: the writer's shape bit selects open entries (value = fixed region) or
+        // instance entries (value = slot to a self-contained instance).
+        let (stride, v_off, val_read) = match body.value.as_ref() {
+            Type::Struct { name } => (
+                format!("inst ? {} : {}", l.inst_stride, l.open_stride),
+                format!("inst ? {} : {}", l.inst_value_offset, l.open_value_offset),
+                format!(
+                    "let p = start + i * stride + vOff\n    if inst {{ let (o, l) = msg.readSlot(p); return {name}Reader(msg: msg, origin: Int(o), end: Int(o) + Int(l), hv: INSTANCE_HV) }}\n    return {name}Reader(msg: msg, origin: p, end: msg.payloadCount, hv: 0)"
+                ),
+            ),
+            _ => (
+                l.open_stride.to_string(),
+                l.open_value_offset.to_string(),
+                format!("return {}", read_expr_hv(&body.value, "start + i * stride + vOff", "0", set)),
+            ),
+        };
         let _ = writeln!(out, "public struct {view}: Sequence {{");
         let _ = writeln!(out, "  let msg: RawMessage");
         let _ = writeln!(out, "  let start: Int");
-        let _ = writeln!(out, "  public let count: Int");
-        let _ = writeln!(out, "  static let stride = {stride}");
-        let _ = writeln!(out, "  static let vOff = {v_off}");
+        let _ = writeln!(out, "  let rawLen: UInt32");
+        let _ = writeln!(out, "  public var count: Int {{ Int(rawLen & LEN_MASK) }}");
+        let _ = writeln!(out, "  var inst: Bool {{ rawLen & SHAPE_BIT != 0 }}");
+        let _ = writeln!(out, "  var stride: Int {{ {stride} }}");
+        let _ = writeln!(out, "  var vOff: Int {{ {v_off} }}");
         let _ = writeln!(out, "  public var isEmpty: Bool {{ count == 0 }}");
         let _ = writeln!(out, "  public func key(at i: Int) -> {key_ty} {{ {key_read} }}");
-        let _ = writeln!(out, "  public func value(at i: Int) -> {val_ty} {{ {val_read} }}");
+        let _ = writeln!(out, "  public func value(at i: Int) -> {val_ty} {{\n    {val_read}\n  }}");
         let _ = writeln!(out, "  public func entry(at i: Int) -> ({key_ty}, {val_ty}) {{ (key(at: i), value(at: i)) }}");
         let _ = writeln!(
             out,
@@ -475,6 +505,29 @@ fn write_base_writer(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         write_field(out, 1, f, &format!("value.{}", swift_field(&f.name)), "base", set);
     }
     let _ = writeln!(out, "}}");
+    if !m.layout.ext_blocks.is_empty() {
+        // the extension chain, appended after the base var data (top-level message or instance)
+        let _ = writeln!(out, "func __write{}Ext(_ w: inout Writer, _ value: {}) {{", m.name, m.name);
+        for b in &m.layout.ext_blocks {
+            line(out, 1, "do {");
+            line(out, 2, &format!("let blk = w.reserve({})", b.fixed_len));
+            for f in m.fields.iter().filter(|f| f.since == b.version) {
+                write_field(out, 2, f, &format!("value.{}", swift_field(&f.name)), "blk", set);
+            }
+            line(out, 2, &format!("w.writeTrailer(blk, {})", b.version));
+            line(out, 1, "}");
+        }
+        let _ = writeln!(out, "}}");
+    }
+    // self-contained instance: fixed region, own var data, extension chain; returns its start
+    let _ = writeln!(out, "func __write{}Instance(_ w: inout Writer, _ value: {}) -> Int {{", m.name, m.name);
+    line(out, 1, &format!("let s = w.reserve({})", m.layout.fixed_len));
+    line(out, 1, &format!("__write{}Base(&w, s, value)", m.name));
+    if !m.layout.ext_blocks.is_empty() {
+        line(out, 1, &format!("__write{}Ext(&w, value)", m.name));
+    }
+    line(out, 1, "return s");
+    let _ = writeln!(out, "}}");
 }
 
 /// `public func encode() -> Data`: header + base + extension blocks, all with literal offsets.
@@ -487,15 +540,10 @@ fn write_encode(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     line(out, 2, "w.reserve(8)");
     line(out, 2, &format!("let base = w.reserve({})", m.layout.fixed_len));
     line(out, 2, &format!("__write{}Base(&w, base, self)", m.name));
-    for b in &m.layout.ext_blocks {
-        line(out, 2, "do {");
-        line(out, 3, &format!("let blk = w.reserve({})", b.fixed_len));
-        for f in m.fields.iter().filter(|f| f.since == b.version) {
-            write_field(out, 3, f, &format!("self.{}", swift_field(&f.name)), "blk", set);
-        }
-        line(out, 3, &format!("w.writeTrailer(blk, {})", b.version));
-        line(out, 2, "}");
+    if !m.layout.ext_blocks.is_empty() {
+        line(out, 2, &format!("__write{}Ext(&w, self)", m.name));
     }
+    let _ = set;
     line(out, 2, &format!("w.writeU32(0, {})", m.key));
     line(out, 2, &format!("w.writeU16(4, {})", m.layout.fixed_len));
     line(out, 2, &format!("w.writeU8(6, {max_version})"));
@@ -533,13 +581,29 @@ fn write_value(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, 
         Type::Simple(SimpleType::Bytes) => line(out, level, &format!("w.writeDataSlot({pos}, {val})")),
         Type::Simple(s) => line(out, level, &write_call(*s, pos, val)),
         Type::Enum { .. } => line(out, level, &format!("w.writeI32({pos}, {val}.rawValue)")),
-        Type::Struct { name } => line(out, level, &format!("__write{name}Base(&w, {pos}, {val})")),
+        Type::Struct { name } => {
+            line(out, level, &format!("do {{ let s = __write{name}Instance(&w, {val}); w.writeSlot({pos}, w.rel(s), w.length - s) }}"));
+        }
+        Type::Array { body } if matches!(body.elem.as_ref(), Type::Struct { name } if has_ext(set, name)) => {
+            // elements with extension fields: per-element instance slots, shape bit set
+            let Type::Struct { name } = body.elem.as_ref() else { unreachable!() };
+            let (a, i, r) = (format!("a{depth}"), format!("i{depth}"), format!("r{depth}"));
+            line(out, level, "do {");
+            line(out, level + 1, &format!("let {a} = {val}"));
+            line(out, level + 1, &format!("let {r} = w.reserve({a}.count * 8)"));
+            line(out, level + 1, &format!("for ({i}, v{depth}) in {a}.enumerated() {{"));
+            line(out, level + 2, &format!("let s = __write{name}Instance(&w, v{depth})"));
+            line(out, level + 2, &format!("w.writeSlot({r} + {i} * 8, w.rel(s), w.length - s)"));
+            line(out, level + 1, "}");
+            line(out, level + 1, &format!("w.writeSlot({pos}, w.rel({r}), Int(UInt32({a}.count) | SHAPE_BIT))"));
+            line(out, level, "}");
+        }
         Type::Array { body } => {
             let (a, i, r) = (format!("a{depth}"), format!("i{depth}"), format!("r{depth}"));
             if body.fixed.is_some() && !body.elem.is_slot_shaped() {
                 let w = element_size(&body.elem, set).expect("planned");
                 line(out, level, &format!("for ({i}, v{depth}) in {val}.prefix({}).enumerated() {{", body.fixed.unwrap()));
-                write_value(out, level + 1, &body.elem, &format!("v{depth}"), &format!("{pos} + {i} * {w}"), set, depth + 1);
+                write_open_elem(out, level + 1, &body.elem, &format!("v{depth}"), &format!("{pos} + {i} * {w}"), set, depth + 1);
                 line(out, level, "}");
             } else {
                 let w = element_size(&body.elem, set).expect("planned");
@@ -547,13 +611,22 @@ fn write_value(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, 
                 line(out, level + 1, &format!("let {a} = {val}"));
                 line(out, level + 1, &format!("let {r} = w.reserve({a}.count * {w})"));
                 line(out, level + 1, &format!("for ({i}, v{depth}) in {a}.enumerated() {{"));
-                write_value(out, level + 2, &body.elem, &format!("v{depth}"), &format!("{r} + {i} * {w}"), set, depth + 1);
+                write_open_elem(out, level + 2, &body.elem, &format!("v{depth}"), &format!("{r} + {i} * {w}"), set, depth + 1);
                 line(out, level + 1, "}");
                 line(out, level + 1, &format!("w.writeSlot({pos}, w.rel({r}), {a}.count)"));
                 line(out, level, "}");
             }
         }
         Type::Map { .. } => unreachable!("maps are written by write_map_field"),
+    }
+}
+
+/// An element of a shape=0 (open) array or an unevolved map value: struct elements are written as
+/// their fixed-region footprint at `pos` (their var data appended), everything else as a value.
+fn write_open_elem(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, set: &SchemaSet, depth: usize) {
+    match ty {
+        Type::Struct { name } => line(out, level, &format!("__write{name}Base(&w, {pos}, {val})")),
+        _ => write_value(out, level, ty, val, pos, set, depth),
     }
 }
 
@@ -580,9 +653,18 @@ fn write_map_field(out: &mut String, level: usize, f: &FieldDescriptor, val: &st
     line(out, level + 1, "for (i, k) in ks.enumerated() {");
     line(out, level + 2, &format!("let e = r + i * {stride}"));
     line(out, level + 2, &key_write);
-    write_value(out, level + 2, &body.value, "o[k]!", &format!("e + {v_off}"), set, 0);
+    match body.value.as_ref() {
+        Type::Struct { name } if has_ext(set, name) => {
+            write_value(out, level + 2, &body.value, "o[k]!", &format!("e + {v_off}"), set, 0)
+        }
+        _ => write_open_elem(out, level + 2, &body.value, "o[k]!", &format!("e + {v_off}"), set, 0),
+    }
     line(out, level + 1, "}");
-    line(out, level + 1, &format!("w.writeSlot({pos}, w.rel(r), ks.count)"));
+    let len = match body.value.as_ref() {
+        Type::Struct { name } if has_ext(set, name) => "Int(UInt32(ks.count) | SHAPE_BIT)".to_string(),
+        _ => "ks.count".to_string(),
+    };
+    line(out, level + 1, &format!("w.writeSlot({pos}, w.rel(r), {len})"));
     line(out, level, "}");
 }
 
@@ -601,6 +683,19 @@ fn write_validators(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         }
         let _ = writeln!(out, "}}");
     }
+    // self-contained instance in [lo, hi): base, then every extension block the chain offers
+    // (no version is promised inside an instance, so absent blocks are legal)
+    let _ = writeln!(out, "func __validate{}Inst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {{", m.name);
+    line(out, 1, &format!("try __validate{}Base(m, lo, INSTANCE_HV)", m.name));
+    for b in m.layout.ext_blocks.iter().rev() {
+        let v = b.version;
+        line(out, 1, &format!(
+            "if let bs = m.findExtBlock({name}Reader.EXT_VERSIONS, INSTANCE_HV, {v}, {fixed}, lo: lo, hi: hi) {{ try __validate{name}V{v}(m, bs, INSTANCE_HV) }}",
+            name = m.name,
+            fixed = b.fixed_len
+        ));
+    }
+    let _ = writeln!(out, "}}");
 }
 
 fn write_validate(out: &mut String, m: &MessageDescriptor) {
@@ -673,7 +768,7 @@ fn leaf_stmt(ty: &Type, pos: &str) -> Option<String> {
         Type::Simple(SimpleType::Bytes) => Some(format!("try checkBytesSlot(m, {pos})")),
         Type::Simple(_) => None,
         Type::Enum { name } => Some(format!("try checkEnum({name}.self, m, {pos})")),
-        Type::Struct { name } => Some(format!("try __validate{name}Base(m, {pos}, hv)")),
+        Type::Struct { name } => Some(format!("let (lo, hi) = try checkInstance(m, {pos})\ntry __validate{name}Inst(m, lo, hi)")),
         _ => unreachable!("arrays and maps are handled by validate_body"),
     }
 }
@@ -715,6 +810,21 @@ fn validate_body(ty: &Type, pos: &str, field: &str, f: &FieldDescriptor, set: &S
                     emit_nested(&mut out, 1, field, Some(&i), &leaf);
                     line(&mut out, 0, "}");
                 }
+            } else if let Type::Struct { name } = body.elem.as_ref() {
+                // the writer's shape bit selects open footprints vs instance slots
+                let fixed = fixed_len_of(set, name);
+                let (o, n, s, i) = (format!("o{depth}"), format!("n{depth}"), format!("s{depth}"), format!("i{depth}"));
+                line(&mut out, 0, &format!("let ({o}, {n}, {s}) = try checkRegionShape(m, {pos}, \"{field}\"{idx_arg})"));
+                line(&mut out, 0, &format!("if {s} {{"));
+                line(&mut out, 1, &format!("for {i} in 0..<{n} {{"));
+                emit_nested(&mut out, 2, field, Some(&i), &format!("let (lo, hi) = try checkInstance(m, {o} + {i} * 8)\ntry __validate{name}Inst(m, lo, hi)"));
+                line(&mut out, 1, "}");
+                line(&mut out, 0, "} else {");
+                line(&mut out, 1, &format!("try checkExtent(m, {o}, {n}, {fixed}, \"{field}\"{idx_arg})"));
+                line(&mut out, 1, &format!("for {i} in 0..<{n} {{"));
+                emit_nested(&mut out, 2, field, Some(&i), &format!("try __validate{name}Base(m, {o} + {i} * {fixed}, 0)"));
+                line(&mut out, 1, "}");
+                line(&mut out, 0, "}");
             } else if is_scalar(&body.elem) {
                 line(&mut out, 0, &format!("try checkRegion(m, {pos}, {w}, \"{field}\"{idx_arg})"));
             } else {
@@ -738,6 +848,27 @@ fn validate_body(ty: &Type, pos: &str, field: &str, f: &FieldDescriptor, set: &S
                 return out;
             }
             let (o, n, i) = (format!("o{depth}"), format!("n{depth}"), format!("i{depth}"));
+            if let Type::Struct { name } = body.value.as_ref() {
+                // shape bit selects the entry layout: open (value = fixed region) or instance slot
+                let l = message_core::map_entry_layouts(&body.key, &body.value, set).expect("planned map");
+                let s = format!("s{depth}");
+                line(&mut out, 0, &format!("let ({o}, {n}, {s}) = try checkRegionShape(m, {pos}, \"{field}\"{idx_arg})"));
+                line(&mut out, 0, &format!("let st = {s} ? {} : {}", l.inst_stride, l.open_stride));
+                line(&mut out, 0, &format!("let vo = {s} ? {} : {}", l.inst_value_offset, l.open_value_offset));
+                line(&mut out, 0, &format!("try checkExtent(m, {o}, {n}, st, \"{field}\"{idx_arg})"));
+                line(&mut out, 0, &format!("for {i} in 0..<{n} {{"));
+                line(&mut out, 1, &format!("let e = {o} + {i} * st"));
+                if let Some(leaf) = leaf_stmt(&body.key, "e") {
+                    emit_nested(&mut out, 1, field, Some(&i), &leaf);
+                }
+                line(&mut out, 1, &format!("if {s} {{"));
+                emit_nested(&mut out, 2, field, Some(&i), &format!("let (lo, hi) = try checkInstance(m, e + vo)\ntry __validate{name}Inst(m, lo, hi)"));
+                line(&mut out, 1, "} else {");
+                emit_nested(&mut out, 2, field, Some(&i), &format!("try __validate{name}Base(m, e + vo, 0)"));
+                line(&mut out, 1, "}");
+                line(&mut out, 0, "}");
+                return out;
+            }
             line(&mut out, 0, &format!("let ({o}, {n}) = try checkRegion(m, {pos}, {stride}, \"{field}\"{idx_arg})"));
             line(&mut out, 0, &format!("for {i} in 0..<{n} {{"));
             line(&mut out, 1, &format!("let e = {o} + {i} * {stride}"));

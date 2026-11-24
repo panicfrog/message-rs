@@ -19,7 +19,7 @@ pub fn generate_ts(set: &SchemaSet) -> String {
     );
     let _ = writeln!(
         out,
-        "import {{\n  readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,\n  readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,\n  findExtBlock, ScalarListView, StringListView, BytesListView, SlotListView,\n  StructListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion, vEnum,\n  ValidationError, type ValidationPath,\n}} from './runtime.js';\n"
+        "import {{\n  readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,\n  readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,\n  findExtBlock, findExtBlockIn, ScalarListView, StringListView, BytesListView, SlotListView,\n  StructListView, StructEvoListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion,\n  vRegionShape, vExtent, vInstance, vEnum, ValidationError, type ValidationPath,\n  INSTANCE_HV, SHAPE_BIT, LEN_MASK,\n}} from './runtime.js';\n"
     );
 
     for e in &set.enums {
@@ -51,6 +51,16 @@ pub fn generate_ts(set: &SchemaSet) -> String {
 
 fn line(out: &mut String, level: usize, s: &str) {
     let _ = writeln!(out, "{}{s}", "  ".repeat(level));
+}
+
+/// Whether struct `name` has extension blocks: containers of it are then written in instance
+/// mode (per-element / per-value slots, shape bit set).
+fn has_ext(set: &SchemaSet, name: &str) -> bool {
+    set.message(name).is_some_and(|m| !m.layout.ext_blocks.is_empty())
+}
+
+fn fixed_len_of(set: &SchemaSet, name: &str) -> usize {
+    set.message(name).map(|m| m.layout.fixed_len).expect("planned struct")
 }
 
 fn camel(s: &str) -> String {
@@ -169,7 +179,9 @@ fn field_read(f: &FieldDescriptor, origin: &str, set: &SchemaSet) -> (String, St
         ),
         Type::Struct { name } => (
             format!("{name}Reader"),
-            format!("return new {name}Reader(this.dv, {pos}, this.hv);"),
+            format!(
+                "{{ const [o, l] = readSlot(this.dv, {pos}); return new {name}Reader(this.dv, o, o + l, INSTANCE_HV); }}"
+            ),
         ),
         Type::Array { body } => {
             let (vt, ctor) = elem_view(&body.elem, set);
@@ -223,14 +235,11 @@ fn elem_view(elem: &Type, set: &SchemaSet) -> (String, String) {
             ),
         ),
         Type::Struct { name } => {
-            let stride = set
-                .message(name)
-                .map(|m| m.layout.fixed_len)
-                .unwrap_or(0);
+            let stride = fixed_len_of(set, name);
             (
-                format!("StructListView<{name}Reader>"),
+                format!("StructEvoListView<{name}Reader>"),
                 format!(
-                    "return new StructListView<{name}Reader>(this.dv, OFF, CNT, {stride}, (dv, off, hv) => new {name}Reader(dv, off, hv));"
+                    "return new StructEvoListView<{name}Reader>(this.dv, OFF, CNT, {stride}, (dv, o, e, hv) => new {name}Reader(dv, o, e, hv));"
                 ),
             )
         }
@@ -270,7 +279,7 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     let _ = writeln!(out, "  static readonly EXT_FIXED: Readonly<Record<number, number>> = {ext_fixed};");
     let _ = writeln!(
         out,
-        "\n  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {{}}\n"
+        "\n  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and\n   *  open elements, the instance for self-contained structs); `hv` is the writer's header version\n   *  (INSTANCE_HV inside instances). */\n  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {{}}\n"
     );
     let _ = writeln!(
         out,
@@ -279,7 +288,7 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== {name}Reader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-    return new {name}Reader(payload, 0, full.getUint8(6));
+    return new {name}Reader(payload, 0, payload.byteLength, full.getUint8(6));
   }}\n",
         fixed = m.layout.fixed_len,
     );
@@ -294,19 +303,20 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         if f.since > 1 {
             let since = f.since;
             let find = format!(
-                "findExtBlock(this.dv, {name}Reader.EXT_VERSIONS, this.hv, {since}, {name}Reader.EXT_FIXED[{since}])"
+                "findExtBlockIn(this.dv, {name}Reader.EXT_VERSIONS, this.hv, {since}, {name}Reader.EXT_FIXED[{since}], this.origin, this.end)"
             );
             if f.optional {
                 let _ = writeln!(
                     out,
                     "  get {ts_name}(): {ret} | null {{
     const bs = {find};
-    if (bs === null) return null;
+    if (bs === null || !readBitmapBit(this.dv, bs, {bit})) return null;
     {{
       const __origin = bs;
       {body}
     }}
-  }}"
+  }}",
+                    bit = f.optional_bit.unwrap_or(0)
                 );
             } else {
                 let _ = writeln!(
@@ -396,15 +406,27 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         }
         if let Type::Map { body } = &f.ty {
             let view = format!("{}MapView", pascal(&f.name));
-            let stride = f.element_size.unwrap_or(0);
-            let v_off = f.map_value_offset.unwrap_or(0);
+            let l = message_core::map_entry_layouts(&body.key, &body.value, set).expect("planned map");
             let (k_ret, k_body) = map_part_read(&body.key, "", set);
             let (v_ret, v_body) = map_part_read(&body.value, "", set);
+            // Struct values: the writer's shape bit selects open entries (value = fixed region)
+            // or instance entries (value = slot to a self-contained instance).
+            let (stride, v_off, v_body) = match body.value.as_ref() {
+                Type::Struct { name } => (
+                    format!("(this.inst ? {} : {})", l.inst_stride, l.open_stride),
+                    format!("(this.inst ? {} : {})", l.inst_value_offset, l.open_value_offset),
+                    format!(
+                        "if (this.inst) {{ const [o, l] = readSlot(this.dv, e); return new {name}Reader(this.dv, o, o + l, INSTANCE_HV); }}\n    return new {name}Reader(this.dv, e, this.dv.byteLength, 0);"
+                    ),
+                ),
+                _ => (l.open_stride.to_string(), l.open_value_offset.to_string(), v_body),
+            };
             let _ = writeln!(
                 out,
                 "export class {view} {{
-  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {{}}
-  get length(): number {{ return this.count; }}
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly rawLen: number) {{}}
+  get length(): number {{ return this.rawLen & LEN_MASK; }}
+  private get inst(): boolean {{ return this.rawLen >= SHAPE_BIT; }}
   key(i: number): {k_ret} {{
     const e = this.start + i * {stride};
     {k_body}
@@ -441,7 +463,7 @@ fn map_part_read(ty: &Type, off_suffix: &str, set: &SchemaSet) -> (String, Strin
         ),
         Type::Struct { name } => (
             format!("{name}Reader"),
-            format!("return new {name}Reader(this.dv, e{off_suffix}, 0);"),
+            format!("return new {name}Reader(this.dv, e{off_suffix}, this.dv.byteLength, 0);"),
         ),
         Type::Array { body } => {
             let (vt, ctor) = elem_view(&body.elem, set);
@@ -480,6 +502,14 @@ fn default_ts(f: &FieldDescriptor, set: &SchemaSet) -> String {
         }
         Type::Map { .. } => format!("return new {}MapView(this.dv, 0, 0);", pascal(&f.name)),
     }
+}
+
+/// Inner view construction for struct elements of nested arrays (from slot values o/l).
+fn struct_evo_ctor(name: &str, set: &SchemaSet, dv: &str, o: &str, l: &str) -> String {
+    format!(
+        "new StructEvoListView<{name}Reader>({dv}, {o}, {l}, {}, (dv2, o2, e2, hv2) => new {name}Reader(dv2, o2, e2, hv2))",
+        fixed_len_of(set, name)
+    )
 }
 
 // ---------- Plain-object layer (interface types + materialization) ----------
@@ -524,7 +554,7 @@ fn materialize_field_expr(f: &FieldDescriptor, set: &SchemaSet, c: &str) -> Stri
             }
         }
         Type::Enum { .. } => format!("this.{c}"),
-        Type::Struct { .. } => format!("this.{c}"),
+        Type::Struct { name } => format!("{name}.fromReader(this.{c})"),
         Type::Array { body } => materialize_list(&format!("this.{c}"), &body.elem, set),
         Type::Map { body } => {
             let v_expr = match body.value.as_ref() {
@@ -610,12 +640,7 @@ fn nested_elem_ctor(elem: &Type, set: &SchemaSet) -> String {
         Type::Enum { name } => format!(
             "new StructListView<{name}>(this.dv, o, l, 4, (dv2, off2) => readI32(dv2, off2) as {name})"
         ),
-        Type::Struct { name } => {
-            let stride = set.message(name).map(|m| m.layout.fixed_len).unwrap_or(0);
-            format!(
-                "new StructListView<{name}Reader>(this.dv, o, l, {stride}, (dv2, off2, hv2) => new {name}Reader(dv2, off2, hv2))"
-            )
-        }
+        Type::Struct { name } => struct_evo_ctor(name, set, "this.dv", "o", "l"),
         Type::Array { .. } => "new SlotListView(this.dv, o, l)".to_string(),
         Type::Map { .. } => "null as never".to_string(),
     }
@@ -635,10 +660,33 @@ fn write_base_writer(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         write_field(out, 1, f, &format!("value.{}", camel(&f.name)), "base", set);
     }
     let _ = writeln!(out, "}}\n");
+    if !m.layout.ext_blocks.is_empty() {
+        // the extension chain, appended after the base var data (top-level message or instance)
+        let _ = writeln!(out, "function __write{}Ext(w: Writer, value: {}): void {{", m.name, m.name);
+        for b in &m.layout.ext_blocks {
+            line(out, 1, "{");
+            line(out, 2, &format!("const blk = w.reserve({});", b.fixed_len));
+            for f in m.fields.iter().filter(|f| f.since == b.version) {
+                write_field(out, 2, f, &format!("value.{}", camel(&f.name)), "blk", set);
+            }
+            line(out, 2, &format!("w.trailer(blk, {});", b.version));
+            line(out, 1, "}");
+        }
+        let _ = writeln!(out, "}}\n");
+    }
+    // self-contained instance: fixed region, own var data, extension chain; returns its start
+    let _ = writeln!(out, "function __write{}Instance(w: Writer, value: {}): number {{", m.name, m.name);
+    line(out, 1, &format!("const s = w.reserve({});", m.layout.fixed_len));
+    line(out, 1, &format!("__write{}Base(w, s, value);", m.name));
+    if !m.layout.ext_blocks.is_empty() {
+        line(out, 1, &format!("__write{}Ext(w, value);", m.name));
+    }
+    line(out, 1, "return s;");
+    let _ = writeln!(out, "}}\n");
 }
 
 /// `export function encode(value)`: header + base + extension blocks, all with literal offsets.
-fn write_encode(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
+fn write_encode(out: &mut String, m: &MessageDescriptor, _set: &SchemaSet) {
     let need = 8 + m.layout.fixed_len;
     let max_version = m.layout.ext_blocks.last().map_or(0, |b| b.version);
     line(out, 2, "/** Canonical encoding (byte-identical to Rust): declaration-order var data, sorted map keys. */");
@@ -647,14 +695,8 @@ fn write_encode(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     line(out, 3, "w.reserve(8);");
     line(out, 3, &format!("const base = w.reserve({});", m.layout.fixed_len));
     line(out, 3, &format!("__write{}Base(w, base, value);", m.name));
-    for b in &m.layout.ext_blocks {
-        line(out, 3, "{");
-        line(out, 4, &format!("const blk = w.reserve({});", b.fixed_len));
-        for f in m.fields.iter().filter(|f| f.since == b.version) {
-            write_field(out, 4, f, &format!("value.{}", camel(&f.name)), "blk", set);
-        }
-        line(out, 4, &format!("w.trailer(blk, {});", b.version));
-        line(out, 3, "}");
+    if !m.layout.ext_blocks.is_empty() {
+        line(out, 3, &format!("__write{}Ext(w, value);", m.name));
     }
     line(out, 3, &format!("w.u32(0, {});", m.key));
     line(out, 3, &format!("w.u16(4, {});", m.layout.fixed_len));
@@ -708,7 +750,22 @@ fn write_value(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, 
             line(out, level, &format!("w.i32({pos}, enumNum({name}, {val}));"));
         }
         Type::Struct { name } => {
-            line(out, level, &format!("__write{name}Base(w, {pos}, {val});"));
+            line(out, level, &format!("{{ const s = __write{name}Instance(w, {val}); w.slot({pos}, w.rel(s), w.length - s); }}"));
+        }
+        Type::Array { body } if matches!(body.elem.as_ref(), Type::Struct { name } if has_ext(set, name)) => {
+            // elements with extension fields: per-element instance slots, shape bit set
+            let Type::Struct { name } = body.elem.as_ref() else { unreachable!() };
+            let (a, i, r) = (format!("a{depth}"), format!("i{depth}"), format!("r{depth}"));
+            let elem_ty = ts_type_of(ty, false, set);
+            line(out, level, "{");
+            line(out, level + 1, &format!("const {a}: {elem_ty} = {val} ?? [];"));
+            line(out, level + 1, &format!("const {r} = w.reserve({a}.length * 8);"));
+            line(out, level + 1, &format!("for (let {i} = 0; {i} < {a}.length; {i}++) {{"));
+            line(out, level + 2, &format!("const s = __write{name}Instance(w, {a}[{i}]);"));
+            line(out, level + 2, &format!("w.slot({r} + {i} * 8, w.rel(s), w.length - s);"));
+            line(out, level + 1, "}");
+            line(out, level + 1, &format!("w.slot({pos}, w.rel({r}), ({a}.length | SHAPE_BIT) >>> 0);"));
+            line(out, level, "}");
         }
         Type::Array { body } => {
             let w = element_size(&body.elem, set).expect("element size of a planned schema");
@@ -718,7 +775,7 @@ fn write_value(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, 
                 line(out, level, "{");
                 line(out, level + 1, &format!("const {a}: {elem_ty} = {val} ?? [];"));
                 line(out, level + 1, &format!("for (let {i} = 0; {i} < {}; {i}++) {{", body.fixed.unwrap()));
-                write_value(out, level + 2, &body.elem, &format!("{a}[{i}]"), &format!("{pos} + {i} * {w}"), set, depth + 1);
+                write_open_elem(out, level + 2, &body.elem, &format!("{a}[{i}]"), &format!("{pos} + {i} * {w}"), set, depth + 1);
                 line(out, level + 1, "}");
                 line(out, level, "}");
             } else {
@@ -726,13 +783,39 @@ fn write_value(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, 
                 line(out, level + 1, &format!("const {a}: {elem_ty} = {val} ?? [];"));
                 line(out, level + 1, &format!("const {r} = w.reserve({a}.length * {w});"));
                 line(out, level + 1, &format!("for (let {i} = 0; {i} < {a}.length; {i}++) {{"));
-                write_value(out, level + 2, &body.elem, &format!("{a}[{i}]"), &format!("{r} + {i} * {w}"), set, depth + 1);
+                write_open_elem(out, level + 2, &body.elem, &format!("{a}[{i}]"), &format!("{r} + {i} * {w}"), set, depth + 1);
                 line(out, level + 1, "}");
                 line(out, level + 1, &format!("w.slot({pos}, w.rel({r}), {a}.length);"));
                 line(out, level, "}");
             }
         }
         Type::Map { .. } => unreachable!("maps are written by write_map_field"),
+    }
+}
+
+/// Map slot length expression: the entry count, with the shape bit when the values are instances.
+fn shape_len(count: &str, value: &Type, set: &SchemaSet) -> String {
+    match value {
+        Type::Struct { name } if has_ext(set, name) => format!("({count} | SHAPE_BIT) >>> 0"),
+        _ => count.to_string(),
+    }
+}
+
+/// An element of a shape=0 (open) array: struct elements are written as their fixed-region
+/// footprint at `pos` (their var data appended), everything else as a regular value.
+fn write_open_elem(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, set: &SchemaSet, depth: usize) {
+    match ty {
+        Type::Struct { name } => line(out, level, &format!("__write{name}Base(w, {pos}, {val});")),
+        _ => write_value(out, level, ty, val, pos, set, depth),
+    }
+}
+
+/// A map value at `pos` inside its entry: struct values with extension fields are instance slots,
+/// unevolved struct values are inlined fixed regions.
+fn write_map_value(out: &mut String, level: usize, ty: &Type, val: &str, pos: &str, set: &SchemaSet) {
+    match ty {
+        Type::Struct { name } if has_ext(set, name) => write_value(out, level, ty, val, pos, set, 0),
+        _ => write_open_elem(out, level, ty, val, pos, set, 0),
     }
 }
 
@@ -751,9 +834,9 @@ fn write_map_field(out: &mut String, level: usize, f: &FieldDescriptor, val: &st
         line(out, level + 2, &format!("const e = r + i * {stride};"));
         line(out, level + 2, "const k = ks[i];");
         line(out, level + 2, "{ const b = utf8Encode(k); w.slot(e, w.append(b), b.length); }");
-        write_value_or_map(out, level + 2, f, &body.value, "o[k]", &format!("e + {v_off}"), set);
+        write_map_value(out, level + 2, &body.value, "o[k]", &format!("e + {v_off}"), set);
         line(out, level + 1, "}");
-        line(out, level + 1, &format!("w.slot({pos}, w.rel(r), ks.length);"));
+        line(out, level + 1, &format!("w.slot({pos}, w.rel(r), {});", shape_len("ks.length", &body.value, set)));
     } else {
         // bool / scalar / enum keys: the object key is a string; resolve it to its wire value
         // (or BigInt for 64-bit keys), sort by that, and look the value up by the original key.
@@ -791,9 +874,9 @@ fn write_map_field(out: &mut String, level: usize, f: &FieldDescriptor, val: &st
         line(out, level + 2, &format!("const e = r + i * {stride};"));
         line(out, level + 2, "const k = es[i][1];");
         line(out, level + 2, &kw);
-        write_value_or_map(out, level + 2, f, &body.value, "o[k]", &format!("e + {v_off}"), set);
+        write_map_value(out, level + 2, &body.value, "o[k]", &format!("e + {v_off}"), set);
         line(out, level + 1, "}");
-        line(out, level + 1, &format!("w.slot({pos}, w.rel(r), es.length);"));
+        line(out, level + 1, &format!("w.slot({pos}, w.rel(r), {});", shape_len("es.length", &body.value, set)));
     }
     line(out, level, "}");
 }
@@ -823,6 +906,29 @@ fn write_validators(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
         }
         let _ = writeln!(out, "}}");
     }
+    // self-contained instance in [lo, hi): base, then every extension block the chain offers
+    // (no version is promised inside an instance, so absent blocks are legal)
+    let _ = writeln!(
+        out,
+        "function __validate{}Inst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {{",
+        m.name
+    );
+    line(out, 1, &format!("__validate{}Base(dv, lo, INSTANCE_HV, path);", m.name));
+    for b in m.layout.ext_blocks.iter().rev() {
+        let v = b.version;
+        line(out, 1, "{");
+        line(out, 2, &format!(
+            "const bs = findExtBlockIn(dv, {name}Reader.EXT_VERSIONS, INSTANCE_HV, {v}, {fixed}, lo, hi);",
+            name = m.name,
+            fixed = b.fixed_len
+        ));
+        line(out, 2, &format!("if (bs !== null) __validate{}V{v}(dv, bs, INSTANCE_HV, path);", m.name));
+        line(out, 1, "}");
+    }
+    if m.layout.ext_blocks.is_empty() {
+        line(out, 1, "void hi;");
+    }
+    let _ = writeln!(out, "}}");
     let _ = writeln!(out);
 }
 
@@ -895,9 +1001,29 @@ fn validate_value(out: &mut String, level: usize, ty: &Type, pos: &str, field: &
         }
         Type::Struct { name } => {
             line(out, level, &format!(
-                "__validate{name}Base(dv, {pos}, hv, [...path, '{field}'{}]);",
-                idx.map(|i| format!(", {i}")).unwrap_or_default()
+                "{{ const [lo, hi] = vInstance(dv, {pos}, path, '{field}'{suffix}); __validate{name}Inst(dv, lo, hi, [...path, '{field}'{suffix}]); }}"
             ));
+        }
+        Type::Array { body } if matches!(body.elem.as_ref(), Type::Struct { .. }) => {
+            // the writer's shape bit selects open footprints (fixed regions) vs instance slots
+            let Type::Struct { name } = body.elem.as_ref() else { unreachable!() };
+            let fixed = fixed_len_of(set, name);
+            let (o, n, s, i) = (format!("o{depth}"), format!("n{depth}"), format!("s{depth}"), format!("i{depth}"));
+            line(out, level, "{");
+            line(out, level + 1, &format!("const [{o}, {n}, {s}] = vRegionShape(dv, {pos}, path, '{field}'{suffix});"));
+            line(out, level + 1, &format!("if ({s}) {{"));
+            line(out, level + 2, &format!("for (let {i} = 0; {i} < {n}; {i}++) {{"));
+            line(out, level + 3, &format!(
+                "const [lo, hi] = vInstance(dv, {o} + {i} * 8, path, '{field}', {i}); __validate{name}Inst(dv, lo, hi, [...path, '{field}', {i}]);"
+            ));
+            line(out, level + 2, "}");
+            line(out, level + 1, "} else {");
+            line(out, level + 2, &format!("vExtent(dv, {o}, {n}, {fixed}, path, '{field}'{suffix});"));
+            line(out, level + 2, &format!(
+                "for (let {i} = 0; {i} < {n}; {i}++) __validate{name}Base(dv, {o} + {i} * {fixed}, 0, [...path, '{field}', {i}]);"
+            ));
+            line(out, level + 1, "}");
+            line(out, level, "}");
         }
         Type::Array { body } => {
             let w = element_size(&body.elem, set).expect("element size of a planned schema");
@@ -946,6 +1072,26 @@ fn validate_map_field(out: &mut String, level: usize, f: &FieldDescriptor, pos: 
     let v_off = f.map_value_offset.expect("planned value offset");
     if is_scalar(&body.key) && is_scalar(&body.value) {
         line(out, level, &format!("vRegion(dv, {pos}, {stride}, path, '{field}');"));
+        return;
+    }
+    if let Type::Struct { name } = body.value.as_ref() {
+        // the writer's shape bit selects the entry layout: open (value = fixed region) or
+        // instance (value = slot to a self-contained instance)
+        let l = message_core::map_entry_layouts(&body.key, &body.value, set).expect("planned map");
+        line(out, level, "{");
+        line(out, level + 1, &format!("const [o0, n0, s0] = vRegionShape(dv, {pos}, path, '{field}');"));
+        line(out, level + 1, &format!("const st = s0 ? {} : {};", l.inst_stride, l.open_stride));
+        line(out, level + 1, &format!("const vo = s0 ? {} : {};", l.inst_value_offset, l.open_value_offset));
+        line(out, level + 1, &format!("vExtent(dv, o0, n0, st, path, '{field}');"));
+        line(out, level + 1, "for (let i0 = 0; i0 < n0; i0++) {");
+        line(out, level + 2, "const e = o0 + i0 * st;");
+        validate_value(out, level + 2, &body.key, "e", field, Some("i0"), set, 1);
+        line(out, level + 2, &format!(
+            "if (s0) {{ const [lo, hi] = vInstance(dv, e + vo, path, '{field}', i0); __validate{name}Inst(dv, lo, hi, [...path, '{field}', i0]); }}"
+        ));
+        line(out, level + 2, &format!("else __validate{name}Base(dv, e + vo, 0, [...path, '{field}', i0]);"));
+        line(out, level + 1, "}");
+        line(out, level, "}");
         return;
     }
     line(out, level, "{");

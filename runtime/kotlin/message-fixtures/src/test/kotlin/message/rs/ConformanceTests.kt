@@ -147,14 +147,15 @@ private fun tallyVector(): Pair<String, Map<String, Any?>> {
 /** Mirrors `message_fixtures::sample_user()`. */
 private fun sampleUser() = User(
     id = 42uL, name = "山田", color = Color.GREEN,
-    profile = Profile(age = 30u, bio = "hello 世界", nickname = "yamada"),
+    profile = Profile(age = 30u, bio = "hello 世界", nickname = "yamada", verified = true),
     matrix = listOf(1.5f, -2.25f, 3.125f, 0.0f),
     nums = listOf(Int.MIN_VALUE, -1, 0, 7, Int.MAX_VALUE),
     tags = listOf("a", "b", "c"),
     blobs = listOf(byteArrayOf(1, 2, 3), byteArrayOf(), ByteArray(300) { 255.toByte() }),
     edges = listOf(Node(value = 1u, children = listOf(Node(value = 11u, children = emptyList()))), Node(value = 2u, children = emptyList())),
+    points = listOf(Point(x = 1.5f, y = -2.5f), Point(x = 0.0f, y = 7.25f)),
     counts = mapOf("one" to 1u, "two" to 2u),
-    byId = mapOf(7uL to Profile(age = 25u, bio = "nested", nickname = null)),
+    byId = mapOf(7uL to Profile(age = 25u, bio = "nested", nickname = null, verified = null)),
     avatar = byteArrayOf(9, 8, 7), motto = null,
     stamp = -1_700_000_000_000L, ratio = 3.141592653589793,
     flag = true, small = 200u, wide = 65535u, offset = -32768, preciseId = ULong.MAX_VALUE,
@@ -174,6 +175,11 @@ class UserConformanceTests {
         assertEquals((profile["age"] as Long).toUInt(), r.profile.age)
         assertEquals(profile["bio"], r.profile.bio)
         assertEquals(profile["nickname"], r.profile.nickname)
+        // Profile's own extension block (v2) lives in its self-contained instance
+        assertEquals(true, r.profile.verified)
+        assertEquals(2, r.points.size)
+        assertTrue(!r.points.isInstanceMode)
+        assertEquals(7.25f, r.points[1].y)
         assertEquals(listOf(1.5f, -2.25f, 3.125f, 0.0f), r.matrix.toList())
         assertEquals(listOf(Int.MIN_VALUE, -1, 0, 7, Int.MAX_VALUE), r.nums.toList())
         assertEquals(listOf("a", "b", "c"), r.tags.toList())
@@ -189,6 +195,7 @@ class UserConformanceTests {
         assertEquals(1, r.byId.size)
         assertEquals(7uL, r.byId.key(0))
         assertEquals("nested", r.byId.value(0).bio)
+        assertNull(r.byId.value(0).verified)
         assertContentEquals(byteArrayOf(9, 8, 7), r.avatar)
         assertNull(r.motto)
         assertEquals(-1_700_000_000_000L, r.stamp)
@@ -341,13 +348,13 @@ class ValidateTests {
     fun checksTheHeader() {
         val (hex, _) = userVector()
         val data = hexToBytes(hex)
-        assertEquals(ValidationError.TooShort(need = 176, got = 10), User.validate(data.copyOf(10)))
+        assertEquals(ValidationError.TooShort(need = 168, got = 10), User.validate(data.copyOf(10)))
         val badKey = data.copyOf()
         badKey[0] = (badKey[0].toInt() xor 0xFF).toByte()
         assertEquals(ValidationError.KeyMismatch(expected = 1u, got = 254u), User.validate(badKey))
         val badLen = data.copyOf()
         badLen[4] = (badLen[4].toInt() xor 0xFF).toByte()
-        assertEquals(ValidationError.FixedLenMismatch(expected = 168, got = 87), User.validate(badLen))
+        assertEquals(ValidationError.FixedLenMismatch(expected = 160, got = 160 xor 0xFF), User.validate(badLen))
     }
 
     @Test
@@ -391,11 +398,13 @@ class ValidateTests {
         val (hex, _) = userVector()
         val payload = hex.length / 2 - 8
 
-        // byId[0] -> Profile.bio
+        // byId[0] -> Profile.bio: evolved map values are slots to self-contained instances
         val byIdField = field("User", "by_id")
         val byId = hexToBytes(hex)
         val region = getU32(byId, posOf("User", "by_id")).toInt()
-        val bioSlot = 8 + region + byIdField.mapValueOffset!! + field("Profile", "bio").offset
+        assertEquals(1u, getU32(byId, posOf("User", "by_id") + 4) shr 31)
+        val inst = getU32(byId, 8 + region + byIdField.mapValueOffset!!).toInt()
+        val bioSlot = 8 + inst + field("Profile", "bio").offset
         putU32(byId, bioSlot, UInt.MAX_VALUE)
         assertEquals(
             ValidationError.Nested("byId", 0, ValidationError.Nested("bio", null, ValidationError.SlotOutOfBounds(UInt.MAX_VALUE.toLong(), 6, payload))),
@@ -440,7 +449,7 @@ class ValidateTests {
 
         // header promises v3 but only v2 was written
         val data = hexToBytes(hex)
-        val m = assertNotNull(RawMessage.decode(data, 1u, 168))
+        val m = assertNotNull(RawMessage.decode(data, 1u, 160))
         val v3Start = assertNotNull(m.findExtBlock(intArrayOf(2, 3), 3, 3, 16))
         assertEquals(malformed, User.validate(data.copyOf(8 + v3Start)))
     }
@@ -448,11 +457,38 @@ class ValidateTests {
     @Test
     fun findExtBlockStepsOverNewerBlocksAnOlderReaderDoesNotKnow() {
         val (hex, _) = userVector()
-        val m = assertNotNull(RawMessage.decode(hexToBytes(hex), 1u, 168))
+        val m = assertNotNull(RawMessage.decode(hexToBytes(hex), 1u, 160))
         // an older reader (knows v2 only) reading a v3 buffer still finds its block behind v3
         assertNotNull(m.findExtBlock(intArrayOf(2), 3, 2, 20))
         // a block newer than the header claims is inconsistent
         assertNull(m.findExtBlock(intArrayOf(2), 2, 2, 20))
+    }
+
+    @Test
+    fun checksSelfContainedInstancesAndDegradesMissingChains() {
+        val (hex, _) = userVector()
+        val profileSlot = posOf("User", "profile")
+
+        val oob = hexToBytes(hex)
+        putU32(oob, profileSlot, UInt.MAX_VALUE)
+        assertEquals("profile", (User.validate(oob) as ValidationError.Nested).field)
+
+        val badBio = hexToBytes(hex)
+        val inst = getU32(badBio, profileSlot).toInt()
+        val bio = getU32(badBio, 8 + inst + field("Profile", "bio").offset).toInt()
+        badBio[8 + bio] = 0xFF.toByte()
+        assertEquals(
+            ValidationError.Nested("profile", null, ValidationError.Nested("bio", null, ValidationError.InvalidUtf8)),
+            User.validate(badBio),
+        )
+
+        // an instance slot covering only the fixed region + own var data looks like an older writer
+        val truncated = hexToBytes(hex)
+        putU32(truncated, profileSlot + 4, 24u)
+        assertNull(User.validate(truncated))
+        val r = assertNotNull(UserReader.decode(truncated))
+        assertNull(r.profile.verified)
+        assertEquals("hello 世界", r.profile.bio)
     }
 
     @Test

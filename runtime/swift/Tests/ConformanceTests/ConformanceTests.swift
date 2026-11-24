@@ -64,14 +64,15 @@ private func tallyVector() throws -> (hex: String, expected: [String: Any]) {
 private func sampleUser() -> User {
     User(
         id: 42, name: "山田", color: .green,
-        profile: Profile(age: 30, bio: "hello 世界", nickname: "yamada"),
+        profile: Profile(age: 30, bio: "hello 世界", nickname: "yamada", verified: true),
         matrix: [1.5, -2.25, 3.125, 0.0],
         nums: [Int32.min, -1, 0, 7, Int32.max],
         tags: ["a", "b", "c"],
         blobs: [Data([1, 2, 3]), Data(), Data(repeating: 255, count: 300)],
         edges: [Node(value: 1, children: [Node(value: 11, children: [])]), Node(value: 2, children: [])],
+        points: [Point(x: 1.5, y: -2.5), Point(x: 0.0, y: 7.25)],
         counts: ["one": 1, "two": 2],
-        byId: [7: Profile(age: 25, bio: "nested", nickname: nil)],
+        byId: [7: Profile(age: 25, bio: "nested", nickname: nil, verified: nil)],
         avatar: Data([9, 8, 7]), motto: nil,
         stamp: -1_700_000_000_000, ratio: 3.141592653589793,
         flag: true, small: 200, wide: 65535, offset: -32768, preciseId: UInt64.max,
@@ -92,6 +93,11 @@ struct UserConformance {
         #expect(r.profile.age == (profile["age"] as! NSNumber).uint32Value)
         #expect(r.profile.bio == (profile["bio"] as! String))
         #expect(r.profile.nickname == (profile["nickname"] as! String))
+        // Profile's own extension block (v2) lives in its self-contained instance
+        #expect(r.profile.verified == true)
+        #expect(r.points.count == 2)
+        #expect(!r.points.isInstanceMode)
+        #expect(r.points[1].y == 7.25)
         #expect(Array(r.matrix) == [1.5, -2.25, 3.125, 0.0])
         #expect(Array(r.nums) == [Int32.min, -1, 0, 7, Int32.max])
         #expect(Array(r.tags) == ["a", "b", "c"])
@@ -106,6 +112,7 @@ struct UserConformance {
         #expect(r.byId.count == 1)
         #expect(r.byId.key(at: 0) == 7)
         #expect(r.byId.value(at: 0).bio == "nested")
+        #expect(r.byId.value(at: 0).verified == nil)
         #expect(r.avatar == Data([9, 8, 7]))
         #expect(r.motto == nil)
         #expect(r.stamp == -1_700_000_000_000)
@@ -196,11 +203,11 @@ struct ValidateTests {
     @Test func checksTheHeader() throws {
         let (hex, _) = try userVector()
         let data = hexToData(hex)
-        #expect(User.validate(data.prefix(10)) == .tooShort(need: 176, got: 10))
+        #expect(User.validate(data.prefix(10)) == .tooShort(need: 168, got: 10))
         var bytes = [UInt8](data); bytes[0] ^= 0xFF
         #expect(User.validate(Data(bytes)) == .keyMismatch(expected: 1, got: 1 ^ 0xFF))
         var bytes2 = [UInt8](data); bytes2[4] ^= 0xFF
-        #expect(User.validate(Data(bytes2)) == .fixedLenMismatch(expected: 168, got: 168 ^ 0xFF))
+        #expect(User.validate(Data(bytes2)) == .fixedLenMismatch(expected: 160, got: 160 ^ 0xFF))
     }
 
     @Test func reportsSlotBoundsUtf8AndEnumValuesWithTheirPath() throws {
@@ -228,12 +235,14 @@ struct ValidateTests {
         let (hex, _) = try userVector()
         let payload = hex.count / 2 - 8
 
-        // byId[0] -> Profile.bio
+        // byId[0] -> Profile.bio: evolved map values are slots to self-contained instances
         var byId = [UInt8](hexToData(hex))
         let byIdField = try field("User", "by_id")
         let byIdSlot = try posOf("User", "by_id")
         let region = Int(getU32(byId, byIdSlot))
-        let bioSlot = 8 + region + byIdField.mapValueOffset! + (try field("Profile", "bio")).offset
+        #expect(getU32(byId, byIdSlot + 4) >> 31 == 1)
+        let inst = Int(getU32(byId, 8 + region + byIdField.mapValueOffset!))
+        let bioSlot = 8 + inst + (try field("Profile", "bio")).offset
         putU32(&byId, bioSlot, .max)
         #expect(User.validate(Data(byId)) == .nested(field: "byId", index: 0, .nested(field: "bio", index: nil, .slotOutOfBounds(off: Int(UInt32.max), len: 6, payload: payload))))
 
@@ -271,18 +280,41 @@ struct ValidateTests {
 
         // header promises v3 but only v2 was written
         let data = hexToData(hex)
-        let m = try #require(RawMessage(decoding: data, key: 1, fixedLen: 168))
+        let m = try #require(RawMessage(decoding: data, key: 1, fixedLen: 160))
         let v3Start = try #require(m.findExtBlock([2, 3], 3, 3, 16))
         #expect(User.validate(data.prefix(8 + v3Start)) == .extBlock(version: 3))
     }
 
     @Test func findExtBlockStepsOverNewerBlocksAnOlderReaderDoesNotKnow() throws {
         let (hex, _) = try userVector()
-        let m = try #require(RawMessage(decoding: hexToData(hex), key: 1, fixedLen: 168))
+        let m = try #require(RawMessage(decoding: hexToData(hex), key: 1, fixedLen: 160))
         // an older reader (knows v2 only) reading a v3 buffer still finds its block behind v3
         #expect(m.findExtBlock([2], 3, 2, 20) != nil)
         // a block newer than the header claims is inconsistent
         #expect(m.findExtBlock([2], 2, 2, 20) == nil)
+    }
+
+    @Test func checksSelfContainedInstancesAndDegradesMissingChains() throws {
+        let (hex, _) = try userVector()
+        let profileSlot = try posOf("User", "profile")
+
+        var oob = [UInt8](hexToData(hex))
+        putU32(&oob, profileSlot, .max)
+        if case .nested(field: "profile", index: nil, _)? = User.validate(Data(oob)) {} else { Issue.record("expected a profile error") }
+
+        var badBio = [UInt8](hexToData(hex))
+        let inst = Int(getU32(badBio, profileSlot))
+        let bio = Int(getU32(badBio, 8 + inst + (try field("Profile", "bio")).offset))
+        badBio[8 + bio] = 0xFF
+        #expect(User.validate(Data(badBio)) == .nested(field: "profile", index: nil, .nested(field: "bio", index: nil, .invalidUtf8)))
+
+        // an instance slot covering only the fixed region + own var data looks like an older writer
+        var truncated = [UInt8](hexToData(hex))
+        putU32(&truncated, profileSlot + 4, 24)
+        #expect(User.validate(Data(truncated)) == nil)
+        let r = try #require(UserReader.decode(Data(truncated)))
+        #expect(r.profile.verified == nil)
+        #expect(r.profile.bio == "hello 世界")
     }
 
     @Test func ignoresReservedFields() throws {

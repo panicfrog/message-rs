@@ -13,6 +13,13 @@ import Foundation
 /// Envelope header: `key:u32 | fixed_len:u16 | version:u8 | flags:u8`, little-endian.
 public let MESSAGE_HEADER_LEN = 8
 
+/// High bit of an array/map slot's length: elements are self-contained instances behind slots.
+public let SHAPE_BIT: UInt32 = 0x8000_0000
+/// Count bits of an array/map slot's length.
+public let LEN_MASK: UInt32 = 0x7FFF_FFFF
+/// Header version passed to instance readers: no extension version is promised inside an instance.
+public let INSTANCE_HV: UInt8 = 255
+
 /// Strict-check errors. Leaves describe what is wrong; `nested` wraps them down to the field
 /// (and element) where the problem was found, e.g. "at `edges`[0]: at `children`[1]: invalid utf-8".
 public indirect enum ValidationError: Error, Equatable, CustomStringConvertible {
@@ -89,6 +96,9 @@ public final class RawMessage: @unchecked Sendable {
     /// Total buffer length (header included).
     public var count: Int { MESSAGE_HEADER_LEN + payload.count }
 
+    /// Payload length (header excluded): the extent of top-level readers and open elements.
+    public var payloadCount: Int { payload.count }
+
     // ---- Fixed-size little-endian reads (offsets are payload-relative) ----
 
     @inline(__always) func bound(_ off: Int, _ n: Int) {
@@ -131,16 +141,18 @@ public final class RawMessage: @unchecked Sendable {
         return UnsafeRawBufferPointer(rebasing: payload[off..<off + len])
     }
 
-    /// Locate an extension block by walking back from the payload end; returns its payload start
+    /// Locate an extension block by walking back from `hi` (default: the payload end; the instance
+    /// end for self-contained structs), never crossing below `lo`; returns its payload start
     /// (trailer excluded). Blocks newer than `target` are stepped over even when this reader does
-    /// not know them. A block shorter than `minLen` (its fixed region) counts as absent.
-    public func findExtBlock(_ versions: [UInt16], _ hv: UInt8, _ target: UInt16, _ minLen: Int) -> Int? {
+    /// not know them. A block shorter than `minLen` (its fixed region) counts as absent. Instance
+    /// readers pass `hv = INSTANCE_HV` (no version is promised inside an instance).
+    public func findExtBlock(_ versions: [UInt16], _ hv: UInt8, _ target: UInt16, _ minLen: Int, lo: Int = 0, hi: Int? = nil) -> Int? {
         let maxKnown = versions.last ?? 0
-        var pos = payload.count
-        while pos >= 6 {
+        var pos = hi ?? payload.count
+        while pos >= lo + 6 {
             let since = readU16(pos - 6)
             let blen = Int(readU32(pos - 4))
-            if since < 2 || since > UInt16(hv) || blen < 6 || blen > pos { return nil }
+            if since < 2 || since > UInt16(hv) || blen < 6 || blen > pos - lo { return nil }
             let start = pos - blen
             if since == target {
                 return pos - 6 - start >= minLen ? start : nil
@@ -178,10 +190,11 @@ extension Int64: MessageScalar { public static var width: Int { 8 }; public stat
 extension Float: MessageScalar { public static var width: Int { 4 }; public static func read(_ m: RawMessage, _ off: Int) -> Float { m.readF32(off) } }
 extension Double: MessageScalar { public static var width: Int { 8 }; public static func read(_ m: RawMessage, _ off: Int) -> Double { m.readF64(off) } }
 
-/// Zero-copy struct view constructible at a payload position (for `StructListView`).
+/// Zero-copy struct view over `[origin, end)` of the payload (the payload for top-level messages
+/// and open elements, the instance for self-contained structs), for `StructEvoListView`.
 public protocol MessageReader {
     static var fixedLen: Int { get }
-    init(msg: RawMessage, origin: Int, hv: UInt8)
+    init(msg: RawMessage, origin: Int, end: Int, hv: UInt8)
 }
 
 // ---- Lazy views ----
@@ -246,17 +259,30 @@ public struct SlotListView: Sequence {
     public func makeIterator() -> Iterator { Iterator(view: self) }
 }
 
-public struct StructListView<T: MessageReader>: Sequence {
+/// Struct elements of an array region whose slot length carries the shape bit. shape=0: open
+/// fixed-region footprints (readers see the payload as their extent and hv=0, so extension fields
+/// are absent); shape=1: 8-byte slots, each pointing at a self-contained instance whose extent
+/// bounds the reader (hv = INSTANCE_HV).
+public struct StructEvoListView<T: MessageReader>: Sequence {
     let msg: RawMessage
     public let start: Int
-    public let count: Int
-    let stride: Int
-    public init(msg: RawMessage, start: Int, count: Int, stride: Int) {
-        self.msg = msg; self.start = start; self.count = count; self.stride = stride
+    let rawLen: UInt32
+    public init(msg: RawMessage, start: Int, rawLen: UInt32) {
+        self.msg = msg; self.start = start; self.rawLen = rawLen
     }
-    public subscript(i: Int) -> T { T(msg: msg, origin: start + i * stride, hv: 0) }
+    public var count: Int { Int(rawLen & LEN_MASK) }
+    /// Whether the writer emitted per-element instances (its element type had extension fields).
+    public var isInstanceMode: Bool { rawLen & SHAPE_BIT != 0 }
+    public subscript(i: Int) -> T {
+        precondition(i >= 0 && i < count, "index \(i) out of bounds (len \(count))")
+        if isInstanceMode {
+            let (o, l) = msg.readSlot(start + i * 8)
+            return T(msg: msg, origin: Int(o), end: Int(o) + Int(l), hv: INSTANCE_HV)
+        }
+        return T(msg: msg, origin: start + i * T.fixedLen, end: msg.payloadCount, hv: 0)
+    }
     public struct Iterator: IteratorProtocol {
-        let view: StructListView<T>
+        let view: StructEvoListView<T>
         var i = 0
         public mutating func next() -> T? { guard i < view.count else { return nil }; defer { i += 1 }; return view[i] }
     }
@@ -283,6 +309,9 @@ public struct Writer {
 
     /// Payload-relative offset of an absolute position.
     public func rel(_ abs: Int) -> Int { abs - MESSAGE_HEADER_LEN }
+
+    /// Bytes written so far (absolute; the header included).
+    public var length: Int { bytes.count }
 
     public mutating func writeU8(_ pos: Int, _ v: UInt8) { bytes[pos] = v }
     public mutating func writeBool(_ pos: Int, _ v: Bool) { bytes[pos] = v ? 1 : 0 }
@@ -366,11 +395,37 @@ public func checkStrSlot(_ m: RawMessage, _ pos: Int) throws {
 
 /// The slot at `pos` holds an element count of `stride`-sized elements; returns (offset, count).
 @discardableResult public func checkRegion(_ m: RawMessage, _ pos: Int, _ stride: Int) throws -> (Int, Int) {
-    let (o, l) = m.readSlot(pos)
-    let (size, overflow1) = Int(l).multipliedReportingOverflow(by: stride)
+    let (o, raw) = m.readSlot(pos)
+    let n = Int(raw & LEN_MASK)
+    let (size, overflow1) = n.multipliedReportingOverflow(by: stride)
     let (end, overflow2) = Int(o).addingReportingOverflow(size)
-    if !overflow1 && !overflow2 && end <= m.payload.count { return (Int(o), Int(l)) }
-    throw ValidationError.slotOutOfBounds(off: Int(o), len: Int(l), payload: m.payload.count)
+    if !overflow1 && !overflow2 && end <= m.payload.count { return (Int(o), n) }
+    throw ValidationError.slotOutOfBounds(off: Int(o), len: Int(raw), payload: m.payload.count)
+}
+
+/// Array/map region slot split into (offset, count, shape); the extent is checked by `checkExtent`.
+public func checkRegionShape(_ m: RawMessage, _ pos: Int, _ field: String, _ index: Int? = nil) throws -> (Int, Int, Bool) {
+    let (o, raw) = m.readSlot(pos)
+    let n = Int(raw & LEN_MASK)
+    if Int(o) + n > m.payload.count {
+        throw ValidationError.nested(field: field, index: index, .slotOutOfBounds(off: Int(o), len: Int(raw), payload: m.payload.count))
+    }
+    return (Int(o), n, raw & SHAPE_BIT != 0)
+}
+
+/// `count` elements of `stride` bytes starting at `off` must lie inside the payload.
+public func checkExtent(_ m: RawMessage, _ off: Int, _ count: Int, _ stride: Int, _ field: String, _ index: Int? = nil) throws {
+    let (size, overflow1) = count.multipliedReportingOverflow(by: stride)
+    let (end, overflow2) = off.addingReportingOverflow(size)
+    if overflow1 || overflow2 || end > m.payload.count {
+        throw ValidationError.nested(field: field, index: index, .slotOutOfBounds(off: off, len: count, payload: m.payload.count))
+    }
+}
+
+/// The instance slot at `pos` must stay inside the payload; returns its [lo, hi) extent.
+public func checkInstance(_ m: RawMessage, _ pos: Int) throws -> (Int, Int) {
+    let (o, l) = try checkBytesSlot(m, pos)
+    return (o, o + l)
 }
 
 /// Same, with a region failure located at `field` (element `index`) like the element checks are.

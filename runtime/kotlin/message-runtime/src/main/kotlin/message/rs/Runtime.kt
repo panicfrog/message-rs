@@ -22,6 +22,15 @@ const val SLOT_LEN = 8
 /** Length of the extension-block trailer `since:u16 | block_len:u32`. */
 const val EXT_TRAILER_LEN = 6
 
+/** High bit of an array/map slot's length (as the raw Int bits): elements are self-contained instances. */
+const val SHAPE_BIT: Int = Int.MIN_VALUE
+
+/** Count bits of an array/map slot's length. */
+const val LEN_MASK: Int = Int.MAX_VALUE
+
+/** Header version passed to instance readers: no extension version is promised inside an instance. */
+const val INSTANCE_HV = 255
+
 /**
  * Strict-check errors. Leaves describe what is wrong; [ValidationError.Nested] wraps them down to
  * the field (and element) where the problem was found, e.g. "at `edges`[0]: at `children`[1]: invalid utf-8".
@@ -100,6 +109,12 @@ data class Slot(val offset: Long, val length: Long)
 
 /** A region the validator located inside the payload: payload-relative offset and element count. */
 data class Region(val offset: Int, val count: Int)
+
+/** An array/map region with the writer's shape bit split off. */
+data class ShapedRegion(val offset: Int, val count: Int, val instances: Boolean)
+
+/** The `[lo, hi)` extent of a self-contained struct instance. */
+data class Extent(val lo: Int, val hi: Int)
 
 /**
  * A decoded buffer: the bytes are copied once into memory owned by this object, and every read
@@ -209,17 +224,19 @@ class RawMessage private constructor(
     }
 
     /**
-     * Locate an extension block by walking back from the payload end; returns its payload start
+     * Locate an extension block by walking back from `hi` (default: the payload end; the instance
+     * end for self-contained structs), never crossing below `lo`; returns its payload start
      * (trailer excluded). Blocks newer than `target` are stepped over even when this reader does
-     * not know them. A block shorter than `minLen` (its fixed region) counts as absent.
+     * not know them. A block shorter than `minLen` (its fixed region) counts as absent. Instance
+     * readers pass `hv = INSTANCE_HV` (no version is promised inside an instance).
      */
-    fun findExtBlock(versions: IntArray, hv: Int, target: Int, minLen: Int): Int? {
+    fun findExtBlock(versions: IntArray, hv: Int, target: Int, minLen: Int, lo: Int = 0, hi: Int = payload.size): Int? {
         val maxKnown = versions.lastOrNull() ?: 0
-        var pos = payload.size
-        while (pos >= EXT_TRAILER_LEN) {
+        var pos = hi
+        while (pos >= lo + EXT_TRAILER_LEN) {
             val since = readU16(pos - 6).toInt()
             val blen = readU32(pos - 4).toLong()
-            if (since < 2 || since > hv || blen < EXT_TRAILER_LEN || blen > pos) return null
+            if (since < 2 || since > hv || blen < EXT_TRAILER_LEN || blen > pos - lo) return null
             val start = pos - blen.toInt()
             if (since == target) return if (pos - EXT_TRAILER_LEN - start >= minLen) start else null
             if (since > target && (since > maxKnown || versions.contains(since))) {
@@ -287,10 +304,14 @@ interface MessageEnumCompanion<E : MessageEnum> : MessageScalar<E> {
     }
 }
 
-/** Zero-copy struct view constructible at a payload position. */
+/**
+ * Zero-copy struct view over `[origin, end)` of the payload (the payload for top-level messages
+ * and open elements, the instance for self-contained structs).
+ */
 interface MessageReader {
     val msg: RawMessage
     val origin: Int
+    val end: Int
     val hv: Int
 }
 
@@ -330,17 +351,32 @@ class SlotListView(val msg: RawMessage, val start: Int, override val size: Int) 
     }
 }
 
-/** Struct elements are contiguous fixed regions of `stride` bytes; `factory` builds the view at `(msg, origin, hv = 0)`. */
-class StructListView<T>(
+/**
+ * Struct elements of an array region whose slot length carries the shape bit (`rawLen` holds the
+ * raw u32 bits). shape=0: open fixed-region footprints of `fixedLen` bytes (readers see the payload
+ * as their extent and hv=0, so extension fields are absent); shape=1: 8-byte slots, each pointing
+ * at a self-contained instance whose extent bounds the reader (hv = INSTANCE_HV). `factory` builds
+ * a view at `(msg, origin, end, hv)`.
+ */
+class StructEvoListView<T>(
     val msg: RawMessage,
     val start: Int,
-    override val size: Int,
-    private val stride: Int,
-    private val factory: (RawMessage, Int, Int) -> T,
+    private val rawLen: Long,
+    private val fixedLen: Int,
+    private val factory: (RawMessage, Int, Int, Int) -> T,
 ) : AbstractList<T>() {
+    override val size: Int get() = (rawLen and LEN_MASK.toLong()).toInt()
+
+    /** Whether the writer emitted per-element instances (its element type had extension fields). */
+    val isInstanceMode: Boolean get() = (rawLen and 0x8000_0000L) != 0L
+
     override fun get(index: Int): T {
         checkIndex(index, size)
-        return factory(msg, start + index * stride, 0)
+        if (isInstanceMode) {
+            val s = msg.readSlot(start + index * SLOT_LEN)
+            return factory(msg, s.offset.toInt(), (s.offset + s.length).toInt(), INSTANCE_HV)
+        }
+        return factory(msg, start + index * fixedLen, msg.payloadSize, 0)
     }
 }
 
@@ -407,6 +443,9 @@ class Writer(capacity: Int = 64) {
     /** Payload-relative offset of an absolute position. */
     fun rel(abs: Int): Int = abs - MESSAGE_HEADER_LEN
 
+    /** Bytes written so far (absolute; the header included). */
+    val length: Int get() = len
+
     /** Append the UTF-8 bytes of `s` and point the slot at `pos` at them. */
     fun writeStringSlot(pos: Int, s: String) = writeBytesSlot(pos, s.toByteArray(Charsets.UTF_8))
 
@@ -467,8 +506,34 @@ fun checkStrSlot(m: RawMessage, pos: Int) {
 /** The slot at `pos` holds an element count of `stride`-sized elements; the whole region must lie inside the payload. */
 fun checkRegion(m: RawMessage, pos: Int, stride: Int): Region {
     val s = m.readSlot(pos)
-    if (s.offset + s.length * stride > m.payloadSize) throw fail(s, m)
-    return Region(s.offset.toInt(), s.length.toInt())
+    val count = s.length and LEN_MASK.toLong()
+    if (s.offset + count * stride > m.payloadSize) throw fail(s, m)
+    return Region(s.offset.toInt(), count.toInt())
+}
+
+/** Array/map region slot split into (offset, count, shape); the extent is checked by [checkExtent]. */
+fun checkRegionShape(m: RawMessage, pos: Int, field: String, index: Int? = null): ShapedRegion {
+    val s = m.readSlot(pos)
+    val count = s.length and LEN_MASK.toLong()
+    if (s.offset + count > m.payloadSize) {
+        throw ValidationException(ValidationError.Nested(field, index, ValidationError.SlotOutOfBounds(s.offset, s.length, m.payloadSize)))
+    }
+    return ShapedRegion(s.offset.toInt(), count.toInt(), (s.length and 0x8000_0000L) != 0L)
+}
+
+/** `count` elements of `stride` bytes starting at `off` must lie inside the payload. */
+fun checkExtent(m: RawMessage, off: Int, count: Int, stride: Int, field: String, index: Int? = null) {
+    if (off.toLong() + count.toLong() * stride > m.payloadSize) {
+        throw ValidationException(
+            ValidationError.Nested(field, index, ValidationError.SlotOutOfBounds(off.toLong(), count.toLong(), m.payloadSize)),
+        )
+    }
+}
+
+/** The instance slot at `pos` must stay inside the payload; returns its `[lo, hi)` extent. */
+fun checkInstance(m: RawMessage, pos: Int): Extent {
+    val r = checkBytesSlot(m, pos)
+    return Extent(r.offset, r.offset + r.count)
 }
 
 /** Same, with a region failure located at `field` (element `index`) like the element checks are. */

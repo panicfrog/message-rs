@@ -90,3 +90,41 @@ fn types_map_to_swift_idioms() {
     assert!(swift.contains("try nest(\"byColor\", i0) {"));
     assert!(swift.contains("try checkEnum(Color.self, m, e)"));
 }
+
+fn evolved_set() -> SchemaSet {
+    // P evolves (since = 2), Q never does; H holds both as a field, array elements and map values
+    let mut set = SchemaSet {
+        messages: vec![
+            MessageDescriptor::new(21, "P", vec![
+                FieldDescriptor::new("a", SimpleType::U32.into()),
+                FieldDescriptor::new("b", SimpleType::Bool.into()).optional().since(2),
+            ]),
+            MessageDescriptor::new(22, "Q", vec![FieldDescriptor::new("x", SimpleType::F32.into())]),
+            MessageDescriptor::new(23, "H", vec![
+                FieldDescriptor::new("p", Type::structure("P")),
+                FieldDescriptor::new("ps", Type::vec(Type::structure("P"))),
+                FieldDescriptor::new("qs", Type::vec(Type::structure("Q"))),
+                FieldDescriptor::new("by", Type::map(SimpleType::U64.into(), Type::structure("P"))),
+            ]),
+        ],
+        enums: vec![],
+    };
+    plan_schema(&mut set).unwrap();
+    set
+}
+
+#[test]
+fn struct_values_are_self_contained_instances_with_the_shape_bit() {
+    let swift = message_gen::generate_swift(&evolved_set());
+    assert!(swift.contains("func __writePInstance(_ w: inout Writer, _ value: P) -> Int {"), "{swift}");
+    assert!(swift.contains("  __writePExt(&w, value)"));
+    assert!(swift.contains("do { let s = __writePInstance(&w, value.p); w.writeSlot(base + 0, w.rel(s), w.length - s) }"));
+    assert!(swift.contains("return PReader(msg: msg, origin: Int(o), end: Int(o) + Int(l), hv: INSTANCE_HV) }()"));
+    assert!(swift.contains("w.writeSlot(base + 8, w.rel(r0), Int(UInt32(a0.count) | SHAPE_BIT))"));
+    assert!(swift.contains("__writeQBase(&w, r0 + i0 * 4, v0)"));
+    assert!(swift.contains("w.writeSlot(base + 24, w.rel(r), Int(UInt32(ks.count) | SHAPE_BIT))"));
+    assert!(swift.contains("public var ps: StructEvoListView<PReader>"));
+    assert!(swift.contains("func __validatePInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {"));
+    assert!(swift.contains("if let bs = m.findExtBlock(PReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo: lo, hi: hi) { try __validatePV2(m, bs, INSTANCE_HV) }"));
+    assert!(swift.contains("let (o0, n0, s0) = try checkRegionShape(m, base + 8, \"ps\")"));
+}

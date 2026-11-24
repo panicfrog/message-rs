@@ -51,7 +51,7 @@ describe('validate: strict check of untrusted buffers', () => {
 
   it('checks the header', () => {
     const short = User.validate(user().slice(0, 10))!;
-    expect(short.reason).toBe('buffer too short: need 176 bytes, got 10');
+    expect(short.reason).toBe('buffer too short: need 168 bytes, got 10');
     expect(short.path).toEqual([]);
     const badKey = user();
     badKey[0] ^= 0xff;
@@ -82,10 +82,14 @@ describe('validate: strict check of untrusted buffers', () => {
   });
 
   it('nests the path through arrays, map values and nested arrays', () => {
+    // Profile has extension fields, so by_id entries hold a slot to a self-contained instance
     const byId = user();
     const byIdF = field('User', 'by_id');
-    const region = new DataView(byId.buffer).getUint32(posOf('User', 'by_id'), true);
-    const bioSlot = HEADER + region + byIdF.mapValueOffset! + field('Profile', 'bio').offset;
+    const dvb = new DataView(byId.buffer);
+    const region = dvb.getUint32(posOf('User', 'by_id'), true);
+    expect(dvb.getUint32(posOf('User', 'by_id') + 4, true) >>> 31).toBe(1);
+    const inst = dvb.getUint32(HEADER + region + byIdF.mapValueOffset!, true);
+    const bioSlot = HEADER + inst + field('Profile', 'bio').offset;
     putU32(byId, bioSlot, 0xffffffff);
     expect(User.validate(byId)!.path).toEqual(['byId', 0, 'bio']);
 
@@ -136,5 +140,32 @@ describe('validate: strict check of untrusted buffers', () => {
     expect(Legacy.validate(buf)).toBeNull();
     putU32(buf, posOf('Legacy', 'old_name'), 0xffffffff);
     expect(Legacy.validate(buf)).toBeNull();
+  });
+
+  it('checks self-contained struct instances and degrades their missing chains', () => {
+    const profileSlot = posOf('User', 'profile');
+
+    const oob = user();
+    putU32(oob, profileSlot, 0xffffffff);
+    expect(User.validate(oob)!.path).toEqual(['profile']);
+
+    const badBio = user();
+    const dv = new DataView(badBio.buffer);
+    const inst = dv.getUint32(profileSlot, true);
+    const bio = dv.getUint32(HEADER + inst + field('Profile', 'bio').offset, true);
+    badBio[HEADER + bio] = 0xff;
+    const e = User.validate(badBio)!;
+    expect(e.path).toEqual(['profile', 'bio']);
+    expect(e.reason).toBe('invalid utf-8');
+
+    // an instance slot covering only the fixed region + own var data looks like an older writer
+    const truncated = user();
+    const tv = new DataView(truncated.buffer);
+    const fixedLen = snapshot.messages.find((m) => m.name === 'Profile')! as unknown as { layout: { fixedLen: number } };
+    tv.setUint32(profileSlot + 4, fixedLen.layout.fixedLen, true);
+    expect(User.validate(truncated)).toBeNull();
+    const r = UserReader.decode(truncated)!;
+    expect(r.profile.verified).toBeNull();
+    expect(r.profile.bio).toBe('hello 世界');
   });
 });

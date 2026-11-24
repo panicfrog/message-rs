@@ -45,7 +45,7 @@ fn kotlin(set: &SchemaSet) -> String {
 fn everything_is_generated_and_no_ir_is_shipped() {
     let kt = kotlin(&fixture_set());
     assert!(kt.contains("package message.rs\n\nenum class Color"), "{kt}");
-    assert!(kt.contains("class LegacyReader(override val msg: RawMessage, override val origin: Int, override val hv: Int) : MessageReader {"));
+    assert!(kt.contains("class LegacyReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {"));
     assert!(kt.contains("data class Legacy("));
     assert!(kt.contains("private fun __writeLegacyBase(w: Writer, base: Int, value: Legacy) {"));
     assert!(kt.contains("private fun __validateLegacyBase(m: RawMessage, base: Int, hv: Int) {"));
@@ -160,8 +160,8 @@ fn extension_fields_degrade_and_bytes_compare_by_content() {
     let kt = kotlin(&set);
     // v2 block: bitmap 4 | note slot @4 | count u32 @12 -> fixed region 16
     assert!(kt.contains("val EXT_VERSIONS = intArrayOf(2)"), "{kt}");
-    assert!(kt.contains("val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 16) ?: return null"));
-    assert!(kt.contains("val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 16) ?: return 0u"));
+    assert!(kt.contains("val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 16, origin, end) ?: return null"));
+    assert!(kt.contains("val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 16, origin, end) ?: return 0u"));
     assert!(kt.contains("val blk = w.reserve(16)"));
     assert!(kt.contains("w.writeU8(6, 2u)"));
     assert!(kt.contains("__validateEV2(m, checkExtBlock(m, EReader.EXT_VERSIONS, m.version, 2, 16), m.version)"));
@@ -173,4 +173,42 @@ fn extension_fields_degrade_and_bytes_compare_by_content() {
     assert!(kt.contains("h = 31 * h + contentHashCode(blobs)"));
     // scalar elements need the region check only, bool included
     assert!(kt.contains("checkRegion(m, base + 16, 1, \"flags\")"));
+}
+
+fn evolved_set() -> SchemaSet {
+    // P evolves (since = 2), Q never does; H holds both as a field, array elements and map values
+    let mut set = SchemaSet {
+        messages: vec![
+            MessageDescriptor::new(21, "P", vec![
+                FieldDescriptor::new("a", SimpleType::U32.into()),
+                FieldDescriptor::new("b", SimpleType::Bool.into()).optional().since(2),
+            ]),
+            MessageDescriptor::new(22, "Q", vec![FieldDescriptor::new("x", SimpleType::F32.into())]),
+            MessageDescriptor::new(23, "H", vec![
+                FieldDescriptor::new("p", Type::structure("P")),
+                FieldDescriptor::new("ps", Type::vec(Type::structure("P"))),
+                FieldDescriptor::new("qs", Type::vec(Type::structure("Q"))),
+                FieldDescriptor::new("by", Type::map(SimpleType::U64.into(), Type::structure("P"))),
+            ]),
+        ],
+        enums: vec![],
+    };
+    plan_schema(&mut set).unwrap();
+    set
+}
+
+#[test]
+fn struct_values_are_self_contained_instances_with_the_shape_bit() {
+    let kt = kotlin(&evolved_set());
+    assert!(kt.contains("private fun __writePInstance(w: Writer, value: P): Int {"), "{kt}");
+    assert!(kt.contains("    __writePExt(w, value)"));
+    assert!(kt.contains("run { val s = __writePInstance(w, value.p); w.writeSlot(base + 0, w.rel(s), w.length - s) }"));
+    assert!(kt.contains("msg.readSlot(origin + 0).let { s -> PReader(msg, s.offset.toInt(), (s.offset + s.length).toInt(), INSTANCE_HV) }"));
+    assert!(kt.contains("w.writeSlot(base + 8, w.rel(r0), a0.size or SHAPE_BIT)"));
+    assert!(kt.contains("__writeQBase(w, r0 + i0 * 4, a0[i0])"));
+    assert!(kt.contains("w.writeSlot(base + 24, w.rel(r), ks.size or SHAPE_BIT)"));
+    assert!(kt.contains("val ps: StructEvoListView<PReader>"));
+    assert!(kt.contains("private fun __validatePInst(m: RawMessage, lo: Int, hi: Int) {"));
+    assert!(kt.contains("m.findExtBlock(PReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo, hi)?.let { __validatePV2(m, it, INSTANCE_HV) }"));
+    assert!(kt.contains("val r0 = checkRegionShape(m, base + 8, \"ps\")"));
 }

@@ -92,3 +92,46 @@ fn map_keys_are_sorted_by_their_wire_value() {
     // scalar keys and values need nothing beyond the region check
     assert!(ts.contains("vRegion(dv, base + 24, 8, path, 'byFlag');"));
 }
+
+fn evolved_set() -> SchemaSet {
+    // P evolves (since = 2), Q never does; H holds both as a field, array elements and map values
+    let mut set = SchemaSet {
+        messages: vec![
+            MessageDescriptor::new(21, "P", vec![
+                FieldDescriptor::new("a", SimpleType::U32.into()),
+                FieldDescriptor::new("b", SimpleType::Bool.into()).optional().since(2),
+            ]),
+            MessageDescriptor::new(22, "Q", vec![FieldDescriptor::new("x", SimpleType::F32.into())]),
+            MessageDescriptor::new(23, "H", vec![
+                FieldDescriptor::new("p", Type::structure("P")),
+                FieldDescriptor::new("ps", Type::vec(Type::structure("P"))),
+                FieldDescriptor::new("qs", Type::vec(Type::structure("Q"))),
+                FieldDescriptor::new("by", Type::map(SimpleType::U64.into(), Type::structure("P"))),
+            ]),
+        ],
+        enums: vec![],
+    };
+    plan_schema(&mut set).unwrap();
+    set
+}
+
+#[test]
+fn struct_values_are_self_contained_instances_with_the_shape_bit() {
+    let ts = message_gen::generate_ts(&evolved_set());
+    // every struct gets an instance writer; evolved ones append their extension chain
+    assert!(ts.contains("function __writePInstance(w: Writer, value: P): number {"), "{ts}");
+    assert!(ts.contains("  __writePExt(w, value);"));
+    // a struct field is a slot to an instance
+    assert!(ts.contains("{ const s = __writePInstance(w, value.p); w.slot(base + 0, w.rel(s), w.length - s); }"));
+    assert!(ts.contains("{ const [o, l] = readSlot(this.dv, this.origin + 0); return new PReader(this.dv, o, o + l, INSTANCE_HV); }"));
+    // evolved elements: per-element instance slots + shape bit; unevolved: open footprints
+    assert!(ts.contains("w.slot(base + 8, w.rel(r0), (a0.length | SHAPE_BIT) >>> 0);"));
+    assert!(ts.contains("__writeQBase(w, r0 + i0 * 4, a0[i0]);"));
+    // evolved map values: instance pair (u64 key + slot -> 16) on write, both pairs on read
+    assert!(ts.contains("w.slot(base + 24, w.rel(r), (es.length | SHAPE_BIT) >>> 0);"));
+    assert!(ts.contains("const e = this.start + i * (this.inst ? 16 : 16);"));
+    // validators: instances checked in their extent, chains only when offered
+    assert!(ts.contains("function __validatePInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {"));
+    assert!(ts.contains("const bs = findExtBlockIn(dv, PReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo, hi);"));
+    assert!(ts.contains("const [o0, n0, s0] = vRegionShape(dv, base + 8, path, 'ps');"));
+}

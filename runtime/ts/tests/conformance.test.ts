@@ -45,6 +45,8 @@ describe('Rust <-> TS cross-language conformance (full-type User vector)', () =>
     expect(r!.profile.age).toBe(e.profile.age);
     expect(r!.profile.bio).toBe(e.profile.bio);
     expect(r!.profile.nickname).toBe(e.profile.nickname);
+    // Profile's own extension block (v2) lives in its self-contained instance
+    expect(r!.profile.verified).toBe(e.profile.verified);
 
     expect(r!.matrix.length).toBe(4);
     for (let i = 0; i < 4; i++) expect(r!.matrix.get(i)).toBeCloseTo(e.matrix[i]);
@@ -76,6 +78,13 @@ describe('Rust <-> TS cross-language conformance (full-type User vector)', () =>
     expect(r!.byId.value(0).age).toBe(e.by_id['7'].age);
     expect(r!.byId.value(0).bio).toBe(e.by_id['7'].bio);
     expect(r!.byId.value(0).nickname).toBeNull();
+    expect(r!.byId.value(0).verified).toBeNull();
+
+    // unevolved struct elements stay compact (no shape bit, fixed-region footprints)
+    expect(r!.points.length).toBe(2);
+    expect(r!.points.isInstanceMode).toBe(false);
+    expect(r!.points.get(0).x).toBe(e.points[0].x);
+    expect(r!.points.get(1).y).toBe(e.points[1].y);
 
     expect(Array.from(r!.avatar!)).toEqual(e.avatar);
     expect(r!.motto).toBeNull();
@@ -108,6 +117,8 @@ describe('Rust <-> TS cross-language conformance (full-type User vector)', () =>
     expect(u!.tags).toEqual(['a', 'b', 'c']);
     expect(u!.counts).toEqual({ one: 1, two: 2 });
     expect(u!.byId['7'].bio).toBe('nested');
+    expect(u!.byId['7'].verified).toBeNull();
+    expect(u!.profile).toEqual({ age: 30, bio: 'hello 世界', nickname: 'yamada', verified: true });
     expect(u!.email).toBe('user@example.com');
     expect(u!.vip).toBe(true);
     // Reader <-> object
