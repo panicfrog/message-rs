@@ -52,3 +52,20 @@ fn tally_layout_is_consistent_across_derive_and_planner() {
     assert_eq!((usage.element_size, usage.map_value_offset), (Some(8), Some(4)));
     assert!(matches!(usage.ty, message_core::Type::Map { .. }));
 }
+
+#[test]
+fn evolved_struct_values_use_the_instance_entry_layout() {
+    let set = message_core::collect_schema().unwrap();
+    let by_id = set.message("User").unwrap().fields.iter().find(|f| f.name == "by_id").unwrap();
+    // Profile has a v2 block, so today's writers emit u64 key @0 + value slot @8 -> stride 16
+    assert_eq!((by_id.element_size, by_id.map_value_offset), (Some(16), Some(8)));
+    let l = message_core::map_entry_layouts(
+        &message_core::SimpleType::U64.into(),
+        &message_core::Type::structure("Profile"),
+        &set,
+    )
+    .unwrap();
+    // the open pair is still what older (pre-v2 Profile) writers produced: 8 + 24-byte fixed region
+    assert_eq!((l.open_value_offset, l.open_stride), (8, 32));
+    assert_eq!((l.inst_value_offset, l.inst_stride), (8, 16));
+}

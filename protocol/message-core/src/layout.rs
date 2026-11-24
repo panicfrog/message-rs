@@ -1,39 +1,33 @@
 //! Version-aware layout planner.
 //!
 //! Two phases:
-//! 1. topologically sort by inline dependencies (struct fields, fixed-array elements), then plan
-//!    each message's per-version blocks (bitmap / field offsets / fixed length); the base and the
-//!    extension blocks are independent of each other and the base is frozen forever;
+//! 1. check that every referenced type exists, then plan each message's per-version blocks
+//!    (bitmap / field offsets / fixed length); the base and the extension blocks are independent
+//!    of each other and the base is frozen forever. Structs are slot-shaped in v2, so planning a
+//!    message never depends on another message's layout and reference cycles are legal;
 //! 2. after everything is planned, back-fill element_size for slot fields (array strides and map
-//!    entry strides). This is deferred because dynamic arrays allow recursion
-//!    (`Node { children: Vec<Node> }`), so stride references impose no topological constraint.
-//!
-//! V1 restriction: a struct with extension blocks (since >= 2 fields) cannot be referenced by
-//! other types (inline, array, or map). An inlined child only contributes its base part, so nested
-//! evolution would silently drop data; reject it explicitly. To evolve, append versioned fields
-//! on the containing message.
+//!    entry strides, writer-current values). This is deferred because strides reference the
+//!    planned fixed lengths of element/value structs.
 
 use crate::descriptor::{ExtBlockLayout, MessageDescriptor, SchemaSet, SINCE_BASE};
 use crate::errors::SchemaError;
-use crate::types::{align_up_usize, element_size, field_size, map_entry_size, type_align, Type};
+use crate::types::{align_up_usize, element_size, field_size, map_entry_layouts, type_align, Type};
 use std::collections::{BTreeMap, HashMap};
 
 /// Plan the whole schema set: fill in every message's layout and run full validation.
 pub fn plan_schema(set: &mut SchemaSet) -> Result<(), SchemaError> {
     validate_uniqueness(set)?;
-    let order = topo_order(set)?;
-    for name in order {
-        let idx = set
-            .messages
-            .iter()
-            .position(|m| m.name == name)
-            .expect("topo order only contains known messages");
-        let mut msg = set.messages[idx].clone();
-        plan_message(&mut msg, set)?;
-        set.messages[idx] = msg;
-    }
+    check_references(set)?;
+    let planned = set
+        .messages
+        .iter()
+        .map(|m| {
+            let mut msg = m.clone();
+            plan_message(&mut msg, set).map(|_| msg)
+        })
+        .collect::<Result<Vec<MessageDescriptor>, SchemaError>>()?;
+    set.messages = planned;
     fill_strides(set)?;
-    check_referenced_structs_frozen(set)?;
     Ok(())
 }
 
@@ -66,60 +60,31 @@ fn validate_uniqueness(set: &SchemaSet) -> Result<(), SchemaError> {
     Ok(())
 }
 
-/// Collect a type's inline dependencies: struct references whose data lands in the parent's
-/// fixed region. (Map values and dynamic-array elements live in the var region; they only create
-/// stride references, not inline dependencies.)
-fn inline_deps_of(ty: &Type, out: &mut Vec<String>) {
-    match ty {
-        Type::Struct { name } => out.push(name.clone()),
-        Type::Array { body } => {
-            if body.fixed.is_some() && !body.elem.is_slot_shaped() {
-                inline_deps_of(&body.elem, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn topo_order(set: &SchemaSet) -> Result<Vec<String>, SchemaError> {
-    let mut state: HashMap<String, u8> = HashMap::new(); // 1 = visiting, 2 = done
-    let mut order = Vec::new();
+/// Every struct/enum referenced by any field must be defined in this schema set.
+fn check_references(set: &SchemaSet) -> Result<(), SchemaError> {
     for m in &set.messages {
-        visit(m.name.as_str(), set, &mut state, &mut order)?;
+        for f in &m.fields {
+            check_type_exists(&f.ty, set)?;
+        }
     }
-    Ok(order)
+    Ok(())
 }
 
-fn visit(
-    name: &str,
-    set: &SchemaSet,
-    state: &mut HashMap<String, u8>,
-    order: &mut Vec<String>,
-) -> Result<(), SchemaError> {
-    match state.get(name) {
-        Some(2) => return Ok(()),
-        Some(1) => return Err(SchemaError::InlineCycle(vec![name.to_string()])),
-        _ => {}
-    }
-    state.insert(name.to_string(), 1);
-    if let Some(m) = set.message(name) {
-        let mut deps = Vec::new();
-        for f in &m.fields {
-            inline_deps_of(&f.ty, &mut deps);
-        }
-        for dep in deps {
-            if dep == name || state.get(&dep) == Some(&1) {
-                return Err(SchemaError::InlineCycle(vec![name.to_string(), dep]));
+fn check_type_exists(ty: &Type, set: &SchemaSet) -> Result<(), SchemaError> {
+    match ty {
+        Type::Struct { name } | Type::Enum { name } => {
+            if set.message(name).is_none() && !set.enums.iter().any(|e| &e.name == name) {
+                return Err(SchemaError::UnknownType(name.clone()));
             }
-            if set.message(&dep).is_none() {
-                return Err(SchemaError::UnknownType(dep));
-            }
-            visit(&dep, set, state, order)?;
+            Ok(())
         }
+        Type::Array { body } => check_type_exists(&body.elem, set),
+        Type::Map { body } => {
+            check_type_exists(&body.key, set)?;
+            check_type_exists(&body.value, set)
+        }
+        _ => Ok(()),
     }
-    state.insert(name.to_string(), 2);
-    order.push(name.to_string());
-    Ok(())
 }
 
 fn bitmap_bytes(optional_count: usize) -> usize {
@@ -181,53 +146,25 @@ fn fill_strides(set: &mut SchemaSet) -> Result<(), SchemaError> {
                     set.messages[mi].fields[fi].element_size = Some(s);
                 }
                 Type::Map { body } => {
-                    let stride = map_entry_size(&body.key, &body.value, set)?;
-                    let v_off = map_value_offset(&body.key, &body.value, set)?;
-                    set.messages[mi].fields[fi].element_size = Some(stride);
-                    set.messages[mi].fields[fi].map_value_offset = Some(v_off);
+                    let layouts = map_entry_layouts(&body.key, &body.value, set)?;
+                    // Writer-current values: an evolved struct value is written as an instance slot.
+                    let use_inst = crate::types::value_has_ext(&body.value, set);
+                    set.messages[mi].fields[fi].element_size = Some(if use_inst {
+                        layouts.inst_stride
+                    } else {
+                        layouts.open_stride
+                    });
+                    set.messages[mi].fields[fi].map_value_offset = Some(if use_inst {
+                        layouts.inst_value_offset
+                    } else {
+                        layouts.open_value_offset
+                    });
                 }
                 _ => {}
             }
         }
     }
     Ok(())
-}
-
-/// Offset of the value inside a map entry.
-fn map_value_offset(key: &Type, value: &Type, set: &SchemaSet) -> Result<usize, SchemaError> {
-    crate::types::validate_map_key(key)?;
-    let k_sz = match key {
-        Type::Simple(s) => s.fixed_size(),
-        Type::Enum { .. } => 4,
-        _ => unreachable!(),
-    };
-    let v_align = type_align(value, set)?;
-    Ok(align_up_usize(k_sz, v_align))
-}
-
-fn check_referenced_structs_frozen(set: &SchemaSet) -> Result<(), SchemaError> {
-    for m in &set.messages {
-        for f in &m.fields {
-            check_type_frozen(&f.ty, set)?;
-        }
-    }
-    Ok(())
-}
-
-fn check_type_frozen(ty: &Type, set: &SchemaSet) -> Result<(), SchemaError> {
-    match ty {
-        Type::Struct { name } => {
-            if let Some(m) = set.message(name) {
-                if !m.layout.ext_blocks.is_empty() {
-                    return Err(SchemaError::EvolvedStructInline(name.clone()));
-                }
-            }
-            Ok(())
-        }
-        Type::Array { body } => check_type_frozen(&body.elem, set),
-        Type::Map { body } => check_type_frozen(&body.value, set),
-        _ => Ok(()),
-    }
 }
 
 /// Serialize into stable, human-readable JSON IR (pretty, 2-space indent).

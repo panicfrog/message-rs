@@ -105,16 +105,18 @@ fn first_type<'a, I: Iterator<Item = &'a syn::GenericArgument>>(
     Err(syn::Error::new(proc_macro2::Span::call_site(), "missing generic argument"))
 }
 
-/// Whether the element/field shape is slot-shaped (string/bytes/map/dynamic array).
+/// Whether the element/field shape is slot-shaped (string/bytes/map/dynamic array/struct).
+/// A referenced struct is a slot pointing at a self-contained instance; a referenced enum is a
+/// 4-byte inline i32. The macro cannot tell them apart, so the distinction happens in the
+/// generated code via `<T as Fixed>::IS_ENUM`.
 pub fn is_slot_shaped(k: &TyKind) -> bool {
     match k {
         TyKind::Scalar(_) => false,
-        TyKind::Str | TyKind::Bytes | TyKind::Map { .. } => true,
+        TyKind::Str | TyKind::Bytes | TyKind::Map { .. } | TyKind::Path(_) => true,
         TyKind::Array { elem, fixed } => match fixed {
             Some(_) => is_slot_shaped(elem),
             None => true,
         },
-        TyKind::Path(_) => false,
     }
 }
 
@@ -123,7 +125,7 @@ pub fn ty_str(p: &syn::Type) -> String {
     quote! { #p }.to_string().replace(' ', "")
 }
 
-/// Field footprint expression in the fixed region (numeric literal or `<T as Fixed>::FIXED_LEN`).
+/// Field footprint expression in the fixed region (numeric literal or an `IS_ENUM` branch).
 pub fn size_str(k: &TyKind) -> String {
     match k {
         TyKind::Scalar(s) => format!("{}usize", s.width()),
@@ -132,7 +134,10 @@ pub fn size_str(k: &TyKind) -> String {
             format!("({n} * {})", size_str(elem))
         }
         TyKind::Array { .. } => "8usize".to_string(),
-        TyKind::Path(p) => format!("<{} as ::message_core::Fixed>::FIXED_LEN", ty_str(p)),
+        TyKind::Path(p) => format!(
+            "if <{} as ::message_core::Fixed>::IS_ENUM {{ 4usize }} else {{ 8usize }}",
+            ty_str(p)
+        ),
     }
 }
 
@@ -140,7 +145,6 @@ pub fn size_str(k: &TyKind) -> String {
 pub fn align_str(k: &TyKind) -> String {
     match k {
         TyKind::Scalar(s) => format!("{}usize", s.width()),
-        TyKind::Path(p) => format!("<{} as ::message_core::Fixed>::MAX_ALIGN", ty_str(p)),
         TyKind::Array { elem, fixed: Some(_) } if !is_slot_shaped(elem) => align_str(elem),
         _ => "4usize".to_string(),
     }

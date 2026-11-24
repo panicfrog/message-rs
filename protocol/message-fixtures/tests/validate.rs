@@ -80,11 +80,14 @@ fn nested_errors_carry_the_path() {
     let user = User::__descriptor();
     let payload = sample_user().encode().len() - HEADER_LEN;
 
-    // map value struct field: by_id[0] -> Profile.bio
+    // map value struct field: by_id[0] -> Profile.bio. Profile has extension fields, so the
+    // entry's value is a slot pointing at a self-contained instance (shape bit set on by_id).
     let by_id = field(user, "by_id");
     let mut buf = sample_user().encode();
-    let (o, _) = read_slot(&buf, HEADER_LEN + by_id.offset);
-    let bio_slot = HEADER_LEN + o as usize + by_id.map_value_offset.unwrap() + field(Profile::__descriptor(), "bio").offset;
+    let (o, l) = read_slot(&buf, HEADER_LEN + by_id.offset);
+    assert_ne!(l & message_core::SHAPE_BIT, 0, "evolved map values are written in instance mode");
+    let (inst, _) = read_slot(&buf, HEADER_LEN + o as usize + by_id.map_value_offset.unwrap());
+    let bio_slot = HEADER_LEN + inst as usize + field(Profile::__descriptor(), "bio").offset;
     put_u32(&mut buf, bio_slot, u32::MAX);
     let err = User::validate(&buf).unwrap_err();
     assert_eq!(
@@ -153,6 +156,7 @@ struct UserV2 {
     pub tags: Vec<String>,
     pub blobs: Vec<Vec<u8>>,
     pub edges: Vec<message_fixtures::Node>,
+    pub points: Vec<message_fixtures::Point>,
     pub counts: HashMap<String, u32>,
     pub by_id: HashMap<u64, Profile>,
     pub avatar: Option<Vec<u8>>,
@@ -183,6 +187,7 @@ fn v2_value() -> UserV2 {
         tags: u.tags.clone(),
         blobs: u.blobs.clone(),
         edges: u.edges.clone(),
+        points: u.points.clone(),
         counts: u.counts.clone(),
         by_id: u.by_id.clone(),
         avatar: u.avatar.clone(),
@@ -227,4 +232,54 @@ fn reserved_fields_are_not_validated() {
     let old_name = field(message_fixtures::Legacy::__descriptor(), "old_name");
     put_u32(&mut buf, HEADER_LEN + old_name.offset, u32::MAX);
     assert_eq!(message_fixtures::Legacy::validate(&buf), Ok(()));
+}
+
+// ---- Self-contained struct instances ----
+
+fn profile_instance(buf: &[u8]) -> (usize, usize) {
+    let (o, l) = read_slot(buf, pos_of(User::__descriptor(), "profile"));
+    (HEADER_LEN + o as usize, l as usize)
+}
+
+#[test]
+fn instance_slot_out_of_bounds_is_reported_at_the_field() {
+    let mut buf = sample_user().encode();
+    put_u32(&mut buf, pos_of(User::__descriptor(), "profile"), u32::MAX);
+    let err = User::validate(&buf).unwrap_err();
+    assert!(err.to_string().starts_with("at `profile`: slot out of bounds"), "{err}");
+}
+
+#[test]
+fn errors_inside_an_instance_carry_the_nested_path() {
+    let mut buf = sample_user().encode();
+    let (inst, _) = profile_instance(&buf);
+    let bio = inst + field(Profile::__descriptor(), "bio").offset;
+    let (o, _) = read_slot(&buf, bio);
+    buf[HEADER_LEN + o as usize] = 0xFF;
+    assert_eq!(User::validate(&buf).unwrap_err().to_string(), "at `profile`: at `bio`: invalid utf-8");
+}
+
+#[test]
+fn truncating_an_instance_drops_its_chain_without_error() {
+    // An instance whose slot only covers the fixed region and own var data looks like an older
+    // writer's: no chain to find, the nested since-field degrades instead of failing.
+    let mut buf = sample_user().encode();
+    let (_, len) = profile_instance(&buf);
+    assert!(len > Profile::__descriptor().layout.fixed_len, "the sample instance carries a v2 chain");
+    let len_pos = pos_of(User::__descriptor(), "profile") + 4;
+    put_u32(&mut buf, len_pos, Profile::__descriptor().layout.fixed_len as u32);
+    assert_eq!(User::validate(&buf), Ok(()));
+    let r = User::decode(&buf).unwrap();
+    assert_eq!(r.profile().verified(), None);
+    assert_eq!(r.profile().bio(), "hello 世界");
+}
+
+#[test]
+fn corrupt_instance_trailer_degrades_like_a_missing_block() {
+    let mut buf = sample_user().encode();
+    let (inst, len) = profile_instance(&buf);
+    // the v2 trailer sits at the instance tail; name an unknown, older version there
+    buf[inst + len - 6] = 1;
+    assert_eq!(User::validate(&buf), Ok(()), "instances promise no version, absent blocks are legal");
+    assert_eq!(User::decode(&buf).unwrap().profile().verified(), None);
 }

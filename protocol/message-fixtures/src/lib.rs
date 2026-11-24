@@ -9,13 +9,25 @@ pub enum Color {
     Blue,
 }
 
-/// Inline nested struct (with an optional bitmap and string slots).
+/// Nested struct (with an optional bitmap and string slots) that itself evolves: `verified`
+/// lives in the instance's own extension chain, so every container of Profile (field, map
+/// value) flips to instance mode once this schema is deployed.
 #[derive(Debug, Clone, PartialEq, Message)]
 #[msg(key = 0x0002)]
 pub struct Profile {
     pub age: u32,
     pub bio: String,
     pub nickname: Option<String>,
+    #[msg(since = 2)]
+    pub verified: Option<bool>,
+}
+
+/// Small unevolved struct: arrays of it stay compact (shape=0, no per-element cost).
+#[derive(Debug, Clone, Copy, PartialEq, Message)]
+#[msg(key = 0x0006)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Recursion through a dynamic array.
@@ -79,6 +91,7 @@ pub struct User {
     pub tags: Vec<String>,
     pub blobs: Vec<Vec<u8>>,
     pub edges: Vec<Node>,
+    pub points: Vec<Point>,
     pub counts: std::collections::HashMap<String, u32>,
     pub by_id: std::collections::HashMap<u64, Profile>,
     pub avatar: Option<Vec<u8>>,
@@ -114,6 +127,7 @@ pub fn sample_user() -> User {
             age: 30,
             bio: "hello 世界".to_string(),
             nickname: Some("yamada".to_string()),
+            verified: Some(true),
         },
         matrix: [1.5, -2.25, 3.125, 0.0],
         nums: vec![i32::MIN, -1, 0, 7, i32::MAX],
@@ -123,6 +137,7 @@ pub fn sample_user() -> User {
             Node { value: 1, children: vec![Node { value: 11, children: vec![] }] },
             Node { value: 2, children: vec![] },
         ],
+        points: vec![Point { x: 1.5, y: -2.5 }, Point { x: 0.0, y: 7.25 }],
         counts: {
             let mut m = std::collections::HashMap::new();
             m.insert("one".to_string(), 1u32);
@@ -133,7 +148,7 @@ pub fn sample_user() -> User {
             let mut m = std::collections::HashMap::new();
             m.insert(
                 7u64,
-                Profile { age: 25, bio: "nested".to_string(), nickname: None },
+                Profile { age: 25, bio: "nested".to_string(), nickname: None, verified: None },
             );
             m
         },

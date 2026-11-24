@@ -144,23 +144,36 @@ pub fn expand_struct(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStrea
     }
     for s in &specs {
         if let TyKind::Map { key, value } = &s.kind {
-            let vo = format!("m_{}_v_off", s.name);
-            let st = format!("m_{}_stride", s.name);
+            let base = format!("m_{}", s.name);
+            let (vo0, st0) = (format!("{base}_v_off0"), format!("{base}_stride0"));
+            let (vo1, st1) = (format!("{base}_v_off1"), format!("{base}_stride1"));
             let k_sz = size_str(key);
             let k_al = align_str(key);
-            let v_sz = size_str(value);
-            let v_al = align_str(value);
-            lf.push(format!("pub {vo}: usize"));
-            lf.push(format!("pub {st}: usize"));
+            // Open pair: the value inlined at its natural alignment (a struct's fixed region).
+            // Instance pair: the value is one 8-byte slot pointing at a self-contained instance.
+            let (v_sz, v_al) = match value.as_ref() {
+                TyKind::Path(p) => (
+                    format!("<{} as ::message_core::Fixed>::FIXED_LEN", ty_str(p)),
+                    format!("<{} as ::message_core::Fixed>::MAX_ALIGN", ty_str(p)),
+                ),
+                _ => (size_str(value), align_str(value)),
+            };
+            lf.push(format!("pub {vo0}: usize"));
+            lf.push(format!("pub {st0}: usize"));
+            lf.push(format!("pub {vo1}: usize"));
+            lf.push(format!("pub {st1}: usize"));
+            lb.push(format!("let {vo0}: usize = ::message_core::align_up_usize({k_sz}, {v_al});"));
             lb.push(format!(
-                "let {vo}: usize = ::message_core::align_up_usize({k_sz}, {v_al});"
+                "let {st0}: usize = ::message_core::align_up_usize({vo0} + {v_sz}, {layout_ty}::__max({k_al}, {v_al}));"
             ));
+            lb.push(format!("let {vo1}: usize = ::message_core::align_up_usize({k_sz}, 4usize);"));
             lb.push(format!(
-                "let {st}: usize = ::message_core::align_up_usize({vo} + {v_sz}, {layout_ty}::__max({k_al}, {v_al}));",
-                layout_ty = layout_ty
+                "let {st1}: usize = ::message_core::align_up_usize({vo1} + 8usize, {layout_ty}::__max({k_al}, 4usize));"
             ));
-            li.push(vo);
-            li.push(st);
+            li.push(vo0);
+            li.push(st0);
+            li.push(vo1);
+            li.push(st1);
         }
     }
 
@@ -218,7 +231,9 @@ pub fn expand_struct(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStrea
         }
     }
     let mut ext_checks = String::new();
-    // Highest version first: a corrupt tail is reported at the block that owns it.
+    // Highest version first: a corrupt tail is reported at the block that owns it. Two modes:
+    // top-level / open (hv = the writer's header version, the block is promised) and instance
+    // (hv = INSTANCE_HV, no promise: check the block only when the chain offers it).
     for &v in ext_versions.iter().rev() {
         let mut body = String::new();
         for &i in &blocks[&v] {
@@ -227,7 +242,7 @@ pub fn expand_struct(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStrea
             }
         }
         ext_checks.push_str(&format!(
-            "if hv >= {v}u8 {{\n    let (__bs, _) = ::message_core::check_ext_block(payload, <{name} as ::message_core::Message>::EXT_VERSIONS, hv, {v}u16, __L.b{v}_fixed_len)?;\n    {body}\n}}\n"
+            "if hv == ::message_core::INSTANCE_HV {{\n    if let ::core::option::Option::Some((__bs, _)) = ::message_core::find_ext_block_bounded(payload, <{name} as ::message_core::Message>::EXT_VERSIONS, hv, {v}u16, __L.b{v}_fixed_len, origin, end) {{\n    {body}\n    }}\n}} else if hv >= {v}u8 {{\n    let (__bs, _) = ::message_core::check_ext_block(payload, <{name} as ::message_core::Message>::EXT_VERSIONS, hv, {v}u16, __L.b{v}_fixed_len)?;\n    {body}\n}}\n"
         ));
     }
 
@@ -306,6 +321,7 @@ impl {name} {{
         ::core::option::Option::Some({reader_ty} {{
             payload: &buf[::message_core::HEADER_LEN..],
             origin: 0usize,
+            end: buf.len() - ::message_core::HEADER_LEN,
             header_version: ::message_core::read_u8(buf, 6usize),
         }})
     }}
@@ -313,30 +329,37 @@ impl {name} {{
     /// Strictly check an untrusted buffer; after `Ok` no accessor on the reader can panic.
     pub fn validate(buf: &[u8]) -> ::core::result::Result<(), ::message_core::ValidationError> {{
         ::message_core::validate_header(buf, <{name} as ::message_core::Message>::KEY, <{name} as ::message_core::Fixed>::FIXED_LEN)?;
-        <{name} as ::message_core::StructDecode>::__validate(&buf[::message_core::HEADER_LEN..], 0usize, ::message_core::read_u8(buf, 6usize))
+        <{name} as ::message_core::StructDecode>::__validate(&buf[::message_core::HEADER_LEN..], 0usize, buf.len() - ::message_core::HEADER_LEN, ::message_core::read_u8(buf, 6usize))
     }}
 }}
 
 impl ::message_core::Fixed for {name} {{
     const FIXED_LEN: usize = __L.base_fixed_len;
     const MAX_ALIGN: usize = __L.base_max_align;
+    const HAS_EXT: bool = {has_ext};
 }}
 
 impl ::message_core::StructEncode for {name} {{
     fn __write_fixed(&self, buf: &mut ::message_core::EncBuf, origin: usize) {{
         {base_writes}
     }}
+    fn __write_instance(&self, buf: &mut ::message_core::EncBuf) -> usize {{
+        let __start = buf.reserve(<{name} as ::message_core::Fixed>::FIXED_LEN);
+        <{name} as ::message_core::StructEncode>::__write_fixed(self, buf, __start);
+        {ext_writes}
+        __start
+    }}
 }}
 
 impl ::message_core::StructDecode for {name} {{
     type Reader<'a> = {reader_ty}<'a>;
-    fn __reader<'a>(payload: &'a [u8], origin: usize, header_version: u8) -> {reader_ty}<'a> {{
-        {reader_ty} {{ payload, origin, header_version }}
+    fn __reader<'a>(payload: &'a [u8], origin: usize, end: usize, header_version: u8) -> {reader_ty}<'a> {{
+        {reader_ty} {{ payload, origin, end, header_version }}
     }}
     fn __owned(reader: &{reader_ty}<'_>) -> {name} {{
         reader.to_owned()
     }}
-    fn __validate(payload: &[u8], origin: usize, hv: u8) -> ::message_core::VResult {{
+    fn __validate(payload: &[u8], origin: usize, end: usize, hv: u8) -> ::message_core::VResult {{
         {base_checks}
         {ext_checks}
         ::core::result::Result::Ok(())
@@ -374,6 +397,7 @@ impl ::message_core::Message for {name} {{
 pub struct {reader_ty}<'a> {{
     payload: &'a [u8],
     origin: usize,
+    end: usize,
     header_version: u8,
 }}
 
@@ -393,6 +417,7 @@ impl<'a> {reader_ty}<'a> {{
         lf_joined = lf.join(",\n    "),
         lb_joined = lb.join("\n        "),
         li_joined = li.join(", "),
+        has_ext = !ext_versions.is_empty(),
     );
 
     // Qualify every `__L` reference as `Type::__L` (it is referenced across impls).
@@ -462,6 +487,7 @@ pub fn expand_enum(input: &syn::DeriveInput) -> Result<proc_macro2::TokenStream,
         r#"impl ::message_core::Fixed for {name} {{
     const FIXED_LEN: usize = 4;
     const MAX_ALIGN: usize = 4;
+    const IS_ENUM: bool = true;
 }}
 
 impl ::message_core::StructEncode for {name} {{
@@ -472,11 +498,11 @@ impl ::message_core::StructEncode for {name} {{
 
 impl ::message_core::StructDecode for {name} {{
     type Reader<'a> = {name};
-    fn __reader<'a>(payload: &'a [u8], origin: usize, _hv: u8) -> {name} {{
+    fn __reader<'a>(payload: &'a [u8], origin: usize, _end: usize, _hv: u8) -> {name} {{
         ::message_core::EnumType::__from_i32(::message_core::read_i32(payload, origin))
     }}
     fn __owned(r: &{name}) -> {name} {{ *r }}
-    fn __validate(payload: &[u8], origin: usize, _hv: u8) -> ::message_core::VResult {{
+    fn __validate(payload: &[u8], origin: usize, _end: usize, _hv: u8) -> ::message_core::VResult {{
         ::message_core::check_enum::<{name}>(payload, origin)
     }}
 }}
@@ -740,6 +766,10 @@ fn sc_read(sc: ScalarKind, payload: &str, off: &str) -> String {
     }
 }
 
+fn is_scalar(k: &TyKind) -> bool {
+    matches!(k, TyKind::Scalar(_))
+}
+
 fn slot_patch(pos: &str, val: &str, len: &str) -> String {
     format!(
         "buf.write_u32({pos}, ({val}) as u32);\nbuf.write_u32({pos} + 4usize, ({len}) as u32);"
@@ -772,8 +802,12 @@ fn emit_value_write(kind: &TyKind, val: &str, pos: &str, field: &str) -> String 
             "{{\n    let __p = buf.append({val}.as_slice());\n    {}\n}}",
             slot_patch(pos, "__p", &format!("{val}.len()"))
         ),
-        TyKind::Path(_) => {
-            format!("::message_core::StructEncode::__write_fixed(&({val}), buf, {pos});")
+        TyKind::Path(p) => {
+            let t = ty_str(p);
+            format!(
+                "if <{t} as ::message_core::Fixed>::IS_ENUM {{\n    ::message_core::StructEncode::__write_fixed(&({val}), buf, {pos});\n}} else {{\n    let __s = ::message_core::StructEncode::__write_instance(&({val}), buf);\n    {}\n}}",
+                slot_patch(pos, "buf.payload_rel(__s)", "(buf.payload_len() - buf.payload_rel(__s))")
+            )
         }
         TyKind::Array { elem, fixed } => emit_array_write(val, elem, *fixed, pos),
         TyKind::Map { .. } => emit_map_write(kind, val, pos, field),
@@ -800,11 +834,26 @@ fn emit_array_write(val: &str, elem: &TyKind, fixed: Option<u32>, pos: &str) -> 
             }
         }
     } else {
-        let stride = element_size_str(elem).unwrap_or_else(|_| "8usize".into());
+        // Struct elements are open (fixed-stride footprints) until the type gains extension
+        // fields, after which new writers emit per-element instance slots (shape bit set).
+        let (stride, shape) = match elem {
+            TyKind::Path(p) => {
+                let t = ty_str(p);
+                (
+                    format!(
+                        "(if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ <{t} as ::message_core::Fixed>::FIXED_LEN }} else {{ 8usize }})"
+                    ),
+                    format!(
+                        "(if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ 0u32 }} else {{ ::message_core::SHAPE_BIT }})"
+                    ),
+                )
+            }
+            _ => (element_size_str(elem).unwrap_or_else(|_| "8usize".into()), "0u32".to_string()),
+        };
         format!(
-            "{{\n    let __n = ({val}).len();\n    let __r0 = buf.reserve(__n * {stride});\n    {}\n    {}\n}}",
+            "{{\n    let __n = ({val}).len();\n    let __shape: u32 = {shape};\n    let __r0 = buf.reserve(__n * {stride});\n    {}\n    {}\n}}",
             emit_elem_loop(val, elem, "__r0", 0),
-            slot_patch(pos, "buf.payload_rel(__r0)", "__n")
+            slot_patch(pos, "buf.payload_rel(__r0)", "(__n as u32 | __shape)")
         )
     }
 }
@@ -825,10 +874,15 @@ fn emit_elem_loop(arr: &str, elem: &TyKind, region: &str, depth: usize) -> Strin
             "{{ let __p = buf.append({ev}.as_slice()); {} }}",
             slot_patch(&format!("{region} + {idx} * 8usize"), "__p", &format!("{ev}.len()"))
         ),
-        TyKind::Path(_) => {
-            let stride = element_size_str(elem).unwrap_or_else(|_| "8usize".into());
+        TyKind::Path(p) => {
+            let t = ty_str(p);
+            let inst = slot_patch(
+                &format!("{region} + {idx} * 8usize"),
+                &format!("buf.payload_rel(__s{depth})"),
+                &format!("(buf.payload_len() - buf.payload_rel(__s{depth}))"),
+            );
             format!(
-                "::message_core::StructEncode::__write_fixed({ev}, buf, {region} + {idx} * {stride});"
+                "if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ ::message_core::StructEncode::__write_fixed({ev}, buf, {region} + {idx} * <{t} as ::message_core::Fixed>::FIXED_LEN); }} else {{ let __s{depth} = ::message_core::StructEncode::__write_instance({ev}, buf); {inst} }}"
             )
         }
         TyKind::Array { elem: inner, fixed: _ } => {
@@ -850,10 +904,27 @@ fn emit_map_write(kind: &TyKind, val: &str, pos: &str, field: &str) -> String {
         TyKind::Map { key, value } => (key, value),
         _ => return String::new(),
     };
-    let stride = format!("__L.m_{field}_stride");
-    let v_off = format!("__L.m_{field}_v_off");
+    // The entry layout depends on the value's shape: an evolved struct value is written as an
+    // instance slot (stride1/v_off1 + shape bit), everything else uses the open pair.
+    let (prelude, v_shape_branch) = match value.as_ref() {
+        TyKind::Path(p) => {
+            let t = ty_str(p);
+            (
+                format!(
+                    "let __has_ext = !<{t} as ::message_core::Fixed>::IS_ENUM && <{t} as ::message_core::Fixed>::HAS_EXT;\n    let __stride = if __has_ext {{ __L.m_{field}_stride1 }} else {{ __L.m_{field}_stride0 }};\n    let __v_off = if __has_ext {{ __L.m_{field}_v_off1 }} else {{ __L.m_{field}_v_off0 }};\n    let __shape: u32 = if __has_ext {{ ::message_core::SHAPE_BIT }} else {{ 0u32 }};"
+                ),
+                true,
+            )
+        }
+        _ => (
+            format!(
+                "let __stride = __L.m_{field}_stride0;\n    let __v_off = __L.m_{field}_v_off0;\n    let __shape: u32 = 0u32;"
+            ),
+            false,
+        ),
+    };
     let k_pos = "__e".to_string();
-    let v_pos = format!("__e + {v_off}");
+    let v_pos = "__e + __v_off".to_string();
     let (k_write, sort) = match key.as_ref() {
         TyKind::Scalar(sc) => (sc_write(*sc, &k_pos, "(**k)"), "__entries.sort_by(|a, b| a.0.cmp(b.0));".to_string()),
         TyKind::Str => (
@@ -880,14 +951,25 @@ fn emit_map_write(kind: &TyKind, val: &str, pos: &str, field: &str) -> String {
             slot_patch(&v_pos, "__p", "(**v).len()")
         ),
         TyKind::Path(_) => {
-            format!("::message_core::StructEncode::__write_fixed(*v, buf, {v_pos});")
+            if v_shape_branch {
+                let inst = slot_patch(
+                    &v_pos,
+                    "buf.payload_rel(__vs)",
+                    "(buf.payload_len() - buf.payload_rel(__vs))",
+                );
+                format!(
+                    "if !__has_ext {{ ::message_core::StructEncode::__write_fixed(*v, buf, {v_pos}); }} else {{ let __vs = ::message_core::StructEncode::__write_instance(*v, buf); {inst} }}"
+                )
+            } else {
+                format!("::message_core::StructEncode::__write_fixed(*v, buf, {v_pos});")
+            }
         }
         TyKind::Array { elem, fixed } => emit_array_write("(**v)", elem, *fixed, &v_pos),
         _ => String::new(),
     };
     format!(
-        "{{\n    let mut __entries: ::std::vec::Vec<_> = ({val}).iter().collect();\n    {sort}\n    let __n = __entries.len();\n    let __region = buf.reserve(__n * {stride});\n    for (i, (k, v)) in __entries.iter().enumerate() {{\n        let __e = __region + i * {stride};\n        {k_write}\n        {v_write}\n    }}\n    {}\n}}",
-        slot_patch(pos, "buf.payload_rel(__region)", "__n")
+        "{{\n    let mut __entries: ::std::vec::Vec<_> = ({val}).iter().collect();\n    {sort}\n    {prelude}\n    let __n = __entries.len();\n    let __region = buf.reserve(__n * __stride);\n    for (i, (k, v)) in __entries.iter().enumerate() {{\n        let __e = __region + i * __stride;\n        {k_write}\n        {v_write}\n    }}\n    {}\n}}",
+        slot_patch(pos, "buf.payload_rel(__region)", "(__n as u32 | __shape)")
     )
 }
 
@@ -906,7 +988,7 @@ fn view_ret_ty(kind: &TyKind) -> String {
             TyKind::Str => "::message_core::StringListView<'a>".into(),
             TyKind::Bytes => "::message_core::BytesListView<'a>".into(),
             TyKind::Path(p) => {
-                format!("::message_core::StructListView<'a, {}>", ty_str(p))
+                format!("::message_core::StructEvoListView<'a, {}>", ty_str(p))
             }
             _ => "::message_core::SlotListView<'a>".into(),
         },
@@ -929,7 +1011,7 @@ fn view_ctor(kind: &TyKind, payload: &str, start: &str, count: &str) -> String {
                 format!("::message_core::BytesListView::new({payload}, {start}, {count})")
             }
             TyKind::Path(p) => format!(
-                "::message_core::StructListView::<{}>::new({payload}, {start}, {count})",
+                "::message_core::StructEvoListView::<{}>::new({payload}, {start}, {count} as u32)",
                 ty_str(p)
             ),
             _ => format!("::message_core::SlotListView::new({payload}, {start}, {count})"),
@@ -948,7 +1030,7 @@ fn default_expr(kind: &TyKind, field: &str) -> String {
         TyKind::Bytes => "&[]".into(),
         TyKind::Array { .. } => view_ctor(kind, "self.payload", "0usize", "0usize"),
         TyKind::Map { .. } => format!(
-            "{} {{ payload: self.payload, start: 0usize, count: 0usize }}",
+            "{} {{ payload: self.payload, start: 0usize, raw_len: 0u32 }}",
             map_view_ident(field)
         ),
     }
@@ -979,10 +1061,12 @@ fn emit_accessor(s: &FieldSpec, parent: &str, opt_bit: Option<usize>) -> String 
             TyKind::Bytes => format!(
                 "{{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); ::message_core::slot_slice(self.payload, o, l) }}"
             ),
-            TyKind::Path(p) => format!(
-                "<{} as ::message_core::StructDecode>::__reader(self.payload, {pos}, self.header_version)",
-                ty_str(p)
-            ),
+            TyKind::Path(p) => {
+                let t = ty_str(p);
+                format!(
+                    "if <{t} as ::message_core::Fixed>::IS_ENUM {{ <{t} as ::message_core::StructDecode>::__reader(self.payload, {pos}, self.payload.len(), 0u8) }} else {{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); <{t} as ::message_core::StructDecode>::__reader(self.payload, o as usize, o as usize + l as usize, ::message_core::INSTANCE_HV) }}"
+                )
+            }
             TyKind::Array { elem, fixed } => {
                 if fixed.is_some() && !is_slot_shaped(elem) {
                     let n = fixed.unwrap();
@@ -995,7 +1079,7 @@ fn emit_accessor(s: &FieldSpec, parent: &str, opt_bit: Option<usize>) -> String 
                 }
             }
             TyKind::Map { .. } => format!(
-                "{{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); {} {{ payload: self.payload, start: o as usize, count: l as usize }} }}",
+                "{{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); {} {{ payload: self.payload, start: o as usize, raw_len: l }} }}",
                 map_view.clone().unwrap()
             ),
         }
@@ -1008,7 +1092,7 @@ fn emit_accessor(s: &FieldSpec, parent: &str, opt_bit: Option<usize>) -> String 
 
     if ext {
         let find = format!(
-            "::message_core::find_ext_block(self.payload, <{parent} as ::message_core::Message>::EXT_VERSIONS, self.header_version, {since}u16, __L.b{since}_fixed_len)",
+            "::message_core::find_ext_block_bounded(self.payload, <{parent} as ::message_core::Message>::EXT_VERSIONS, self.header_version, {since}u16, __L.b{since}_fixed_len, self.origin, self.end)",
             since = s.since
         );
         if s.optional {
@@ -1062,10 +1146,27 @@ fn emit_validate_value(kind: &TyKind, pos: &str, field: &str, idx: &str, hv: &st
         TyKind::Scalar(_) => String::new(),
         TyKind::Str => call(format!("::message_core::check_str_slot(payload, {pos})"), idx),
         TyKind::Bytes => call(format!("::message_core::check_bytes_slot(payload, {pos})"), idx),
-        TyKind::Path(p) => call(
-            format!("<{} as ::message_core::StructDecode>::__validate(payload, {pos}, {hv})", ty_str(p)),
-            idx,
-        ),
+        TyKind::Path(p) => {
+            let t = ty_str(p);
+            // enums are inline i32s; structs are self-contained instances referenced by a slot
+            let inst = format!(
+                "{{ let (__lo{depth}, __hi{depth}) = ::message_core::check_instance_slot(payload, {pos}){}; {} }}",
+                nest(idx),
+                call(
+                    format!(
+                        "<{t} as ::message_core::StructDecode>::__validate(payload, __lo{depth}, __hi{depth}, ::message_core::INSTANCE_HV)"
+                    ),
+                    idx
+                )
+            );
+            format!(
+                "if <{t} as ::message_core::Fixed>::IS_ENUM {{ {} }} else {{ {inst} }}",
+                call(
+                    format!("<{t} as ::message_core::StructDecode>::__validate(payload, {pos}, payload.len(), {hv})"),
+                    idx
+                )
+            )
+        }
         TyKind::Array { elem, fixed } => {
             let stride = element_size_str(elem).unwrap_or_else(|_| "8usize".into());
             let i = format!("i{depth}");
@@ -1077,6 +1178,25 @@ fn emit_validate_value(kind: &TyKind, pos: &str, field: &str, idx: &str, hv: &st
                 } else {
                     format!("for {i} in 0..{}usize {{ {body} }}", fixed.unwrap())
                 }
+            } else if let TyKind::Path(p) = elem.as_ref() {
+                // struct elements: the region slot's shape bit selects open footprints vs slots
+                let t = ty_str(p);
+                let (o, n) = (format!("__o{depth}"), format!("__n{depth}"));
+                let (lo, hi) = (format!("__il{depth}"), format!("__ih{depth}"));
+                format!(
+                    "let ({o}, {n}, __sp{depth}) = ::message_core::read_region_slot(payload, {pos}){}; if __sp{depth} {{ for {i} in 0..{n} {{ let ({lo}, {hi}) = ::message_core::check_instance_slot(payload, {o} + {i} * 8usize){}; {} }} }} else {{ {} ; for {i} in 0..{n} {{ {} }} }}",
+                    nest(idx),
+                    nest(&idx_some),
+                    call(
+                        format!("<{t} as ::message_core::StructDecode>::__validate(payload, {lo}, {hi}, ::message_core::INSTANCE_HV)"),
+                        &idx_some
+                    ),
+                    call(format!("::message_core::check_extent(payload, {o}, {n}, <{t} as ::message_core::Fixed>::FIXED_LEN)"), idx),
+                    call(
+                        format!("<{t} as ::message_core::StructDecode>::__validate(payload, {o} + {i} * <{t} as ::message_core::Fixed>::FIXED_LEN, payload.len(), 0u8)"),
+                        &idx_some
+                    ),
+                )
             } else {
                 let (o, n, p) = (format!("__o{depth}"), format!("__n{depth}"), format!("__p{depth}"));
                 let body = emit_validate_value(elem, &p, field, &idx_some, "0u8", depth + 1);
@@ -1091,15 +1211,28 @@ fn emit_validate_value(kind: &TyKind, pos: &str, field: &str, idx: &str, hv: &st
             }
         }
         TyKind::Map { key, value } => {
-            let (o, n, i, e) = (format!("__o{depth}"), format!("__n{depth}"), format!("i{depth}"), format!("__e{depth}"));
-            let stride = format!("__L.m_{field}_stride");
-            let v_pos = format!("{e} + __L.m_{field}_v_off");
+            let (o, n, i, e, vo) = (
+                format!("__o{depth}"),
+                format!("__n{depth}"),
+                format!("i{depth}"),
+                format!("__e{depth}"),
+                format!("__vo{depth}"),
+            );
+            let v_pos = format!("{e} + {vo}");
             let idx_some = format!("::core::option::Option::Some({i})");
+            if is_scalar(key) && is_scalar(value) {
+                // pure scalar maps: no shape bit is ever written, the open stride is final
+                return format!(
+                    "::message_core::check_region(payload, {pos}, __L.m_{field}_stride0){};",
+                    nest(idx)
+                );
+            }
             let k = emit_validate_value(key, &e, field, &idx_some, "0u8", depth + 1);
             let v = emit_validate_value(value, &v_pos, field, &idx_some, "0u8", depth + 1);
             format!(
-                "let ({o}, {n}) = ::message_core::check_region(payload, {pos}, {stride}){}; for {i} in 0..{n} {{ let {e} = {o} + {i} * {stride}; {k} {v} }}",
-                nest(idx)
+                "let ({o}, {n}, __sm{depth}) = ::message_core::read_region_slot(payload, {pos}){}; let __st{depth} = if __sm{depth} {{ __L.m_{field}_stride1 }} else {{ __L.m_{field}_stride0 }}; let {vo} = if __sm{depth} {{ __L.m_{field}_v_off1 }} else {{ __L.m_{field}_v_off0 }}; {} ; for {i} in 0..{n} {{ let {e} = {o} + {i} * __st{depth}; {k} {v} }}",
+                nest(idx),
+                call(format!("::message_core::check_extent(payload, {o}, {n}, __st{depth})"), idx),
             )
         }
     }
@@ -1110,8 +1243,6 @@ fn emit_validate_value(kind: &TyKind, pos: &str, field: &str, idx: &str, hv: &st
 fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> String {
     let f = &s.name;
     let view = map_view_ident(f);
-    let stride = format!("__L.m_{f}_stride");
-    let v_off = format!("__L.m_{f}_v_off");
 
     let key_ret = match key {
         TyKind::Scalar(sc) => rust_scalar_ty(*sc).to_string(),
@@ -1149,9 +1280,12 @@ fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> 
                 "{{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); ::message_core::slot_slice(self.payload, o, l) }}"
             ),
             TyKind::Path(p) => {
+                let t = ty_str(p);
+                // Enum values are inline i32s (their __reader decodes them directly); struct
+                // values are open elements (shape=0) or instance slots (shape=1) depending on
+                // the writer's schema version.
                 format!(
-                    "<{} as ::message_core::StructDecode>::__reader(self.payload, {pos}, 0u8)",
-                    ty_str(p)
+                    "if <{t} as ::message_core::Fixed>::IS_ENUM {{ <{t} as ::message_core::StructDecode>::__reader(self.payload, {pos}, self.payload.len(), 0u8) }} else if self.is_inst() {{ let (o, l) = ::message_core::read_slot(self.payload, {pos}); <{t} as ::message_core::StructDecode>::__reader(self.payload, o as usize, o as usize + l as usize, ::message_core::INSTANCE_HV) }} else {{ <{t} as ::message_core::StructDecode>::__reader(self.payload, {pos}, self.payload.len(), 0u8) }}"
                 )
             }
             TyKind::Array { .. } => format!(
@@ -1167,20 +1301,23 @@ fn emit_map_view(s: &FieldSpec, key: &TyKind, value: &TyKind, _parent: &str) -> 
 pub struct {view}<'a> {{
     payload: &'a [u8],
     start: usize,
-    count: usize,
+    raw_len: u32,
 }}
 
 impl<'a> {view}<'a> {{
-    pub fn len(&self) -> usize {{ self.count }}
-    pub fn is_empty(&self) -> bool {{ self.count == 0 }}
+    pub fn len(&self) -> usize {{ (self.raw_len & ::message_core::LEN_MASK) as usize }}
+    pub fn is_empty(&self) -> bool {{ self.len() == 0 }}
+    fn is_inst(&self) -> bool {{ self.raw_len & ::message_core::SHAPE_BIT != 0 }}
+    fn stride(&self) -> usize {{ if self.is_inst() {{ __L.m_{f}_stride1 }} else {{ __L.m_{f}_stride0 }} }}
+    fn v_off(&self) -> usize {{ if self.is_inst() {{ __L.m_{f}_v_off1 }} else {{ __L.m_{f}_v_off0 }} }}
     pub fn key(&self, i: usize) -> {key_ret} {{
-        ::core::assert!(i < self.count);
-        let __e = self.start + i * {stride};
+        ::core::assert!(i < self.len());
+        let __e = self.start + i * self.stride();
         {kr}
     }}
     pub fn value(&self, i: usize) -> {val_ret} {{
-        ::core::assert!(i < self.count);
-        let __e = self.start + i * {stride} + {v_off};
+        ::core::assert!(i < self.len());
+        let __e = self.start + i * self.stride() + self.v_off();
         {vr}
     }}
     pub fn entry(&self, i: usize) -> ({key_ret}, {val_ret}) {{ (self.key(i), self.value(i)) }}
@@ -1277,7 +1414,15 @@ fn owned_list_expr(view: &str, elem: &TyKind, payload: &str) -> String {
 // ---------- Descriptor ----------
 
 fn field_desc_body(s: &FieldSpec, opt_bit: Option<usize>) -> String {
-    let slot_b = is_slot_shaped(&s.kind);
+    let slot_b = match &s.kind {
+        // a referenced enum is an inline i32, a referenced struct is a slot
+        TyKind::Path(p) => format!(
+            "if <{} as ::message_core::Fixed>::IS_ENUM {{ false }} else {{ true }}",
+            ty_str(p)
+        ),
+        _ => format!("{}", is_slot_shaped(&s.kind)),
+    };
+    let is_path_valued_map = matches!(&s.kind, TyKind::Map { value, .. } if matches!(value.as_ref(), TyKind::Path(_)));
     let elem_size = match &s.kind {
         TyKind::Array { elem, .. } => {
             format!(
@@ -1285,11 +1430,37 @@ fn field_desc_body(s: &FieldSpec, opt_bit: Option<usize>) -> String {
                 element_size_str(elem).unwrap_or_else(|_| "8usize".into())
             )
         }
-        TyKind::Map { .. } => format!("::core::option::Option::Some(__L.m_{}_stride)", s.name),
+        TyKind::Map { value, .. } => {
+            if is_path_valued_map {
+                let t = match value.as_ref() {
+                    TyKind::Path(p) => ty_str(p),
+                    _ => unreachable!(),
+                };
+                format!(
+                    "::core::option::Option::Some(if <{t} as ::message_core::Fixed>::HAS_EXT {{ __L.m_{}_stride1 }} else {{ __L.m_{}_stride0 }})",
+                    s.name, s.name
+                )
+            } else {
+                format!("::core::option::Option::Some(__L.m_{}_stride0)", s.name)
+            }
+        }
         _ => "::core::option::Option::None".to_string(),
     };
     let map_vo = match &s.kind {
-        TyKind::Map { .. } => format!("::core::option::Option::Some(__L.m_{}_v_off)", s.name),
+        TyKind::Map { value, .. } => {
+            if is_path_valued_map {
+                let t = match value.as_ref() {
+                    TyKind::Path(p) => ty_str(p),
+                    _ => unreachable!(),
+                };
+                format!(
+                    "::core::option::Option::Some(if <{t} as ::message_core::Fixed>::HAS_EXT {{ __L.m_{}_v_off1 }} else {{ __L.m_{}_v_off0 }})",
+                    s.name, s.name
+                )
+            } else {
+                format!("::core::option::Option::Some(__L.m_{}_v_off0)", s.name)
+            }
+        }
         _ => "::core::option::Option::None".to_string(),
     };
     format!(

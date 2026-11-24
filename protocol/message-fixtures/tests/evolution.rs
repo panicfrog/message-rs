@@ -5,7 +5,7 @@
 //! - new reader, old buffer: the extension chain is empty, since-fields degrade to defaults.
 
 use message_derive::Message;
-use message_fixtures::{sample_user, Node, Profile, User};
+use message_fixtures::{sample_user, Node, Point, Profile, User};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Message)]
@@ -20,6 +20,7 @@ pub struct UserV1 {
     pub tags: Vec<String>,
     pub blobs: Vec<Vec<u8>>,
     pub edges: Vec<Node>,
+    pub points: Vec<Point>,
     pub counts: HashMap<String, u32>,
     pub by_id: HashMap<u64, Profile>,
     pub avatar: Option<Vec<u8>>,
@@ -58,6 +59,7 @@ fn old_reader_reads_new_buffer() {
         tags: u.tags.clone(),
         blobs: u.blobs.clone(),
         edges: u.edges.clone(),
+        points: u.points.clone(),
         counts: u.counts.clone(),
         by_id: u.by_id.clone(),
         avatar: u.avatar.clone(),
@@ -79,12 +81,13 @@ fn new_reader_reads_old_buffer_with_defaults() {
         id: 7,
         name: "old".to_string(),
         color: message_fixtures::Color::Red,
-        profile: Profile { age: 1, bio: "b".to_string(), nickname: None },
+        profile: Profile { age: 1, bio: "b".to_string(), nickname: None, verified: None },
         matrix: [0.0; 4],
         nums: vec![5],
         tags: vec![],
         blobs: vec![],
         edges: vec![],
+        points: vec![],
         counts: HashMap::new(),
         by_id: HashMap::new(),
         avatar: None,
@@ -110,4 +113,132 @@ fn new_reader_reads_old_buffer_with_defaults() {
     assert_eq!(r.score(), 0.0);
     assert_eq!(r.tags2().len(), 0);
     assert_eq!(r.vip(), None);
+}
+
+// ---- Nested evolution: Profile gained `verified` (since = 2) ----
+
+/// Separate module: derived map views are named after the field (`ByIdMapView`), which
+/// would clash with UserV1's in the same module.
+mod flat {
+    use super::*;
+
+    /// Profile before `verified` was appended (same key and base fields).
+    #[derive(Debug, Clone, PartialEq, Message)]
+    #[msg(key = 0x0002)]
+    pub struct ProfileFlat {
+        pub age: u32,
+        pub bio: String,
+        pub nickname: Option<String>,
+    }
+
+    /// User as compiled against ProfileFlat: base layout identical to User (struct fields are slots).
+    #[derive(Debug, Clone, PartialEq, Message)]
+    #[msg(key = 0x0001)]
+    pub struct UserFlat {
+        pub id: u64,
+        pub name: String,
+        pub color: message_fixtures::Color,
+        pub profile: ProfileFlat,
+        pub matrix: [f32; 4],
+        pub nums: Vec<i32>,
+        pub tags: Vec<String>,
+        pub blobs: Vec<Vec<u8>>,
+        pub edges: Vec<Node>,
+        pub points: Vec<Point>,
+        pub counts: HashMap<String, u32>,
+        pub by_id: HashMap<u64, ProfileFlat>,
+        pub avatar: Option<Vec<u8>>,
+        pub motto: Option<String>,
+        pub stamp: i64,
+        pub ratio: f64,
+        pub flag: bool,
+        pub small: u8,
+        pub wide: u16,
+        pub offset: i16,
+        pub precise_id: u64,
+    }
+
+    pub fn flat_value() -> UserFlat {
+        let u = sample_user();
+        let flat = |p: &Profile| ProfileFlat { age: p.age, bio: p.bio.clone(), nickname: p.nickname.clone() };
+        UserFlat {
+            id: u.id,
+            name: u.name.clone(),
+            color: u.color,
+            profile: flat(&u.profile),
+            matrix: u.matrix,
+            nums: u.nums.clone(),
+            tags: u.tags.clone(),
+            blobs: u.blobs.clone(),
+            edges: u.edges.clone(),
+            points: u.points.clone(),
+            counts: u.counts.clone(),
+            by_id: u.by_id.iter().map(|(k, v)| (*k, flat(v))).collect(),
+            avatar: u.avatar.clone(),
+            motto: u.motto.clone(),
+            stamp: u.stamp,
+            ratio: u.ratio,
+            flag: u.flag,
+            small: u.small,
+            wide: u.wide,
+            offset: u.offset,
+            precise_id: u.precise_id,
+        }
+    }
+}
+use flat::{flat_value, UserFlat};
+use message_core::Message as _;
+
+fn by_id_raw_len(buf: &[u8]) -> u32 {
+    let f = User::__descriptor().fields.iter().find(|f| f.name == "by_id").unwrap();
+    message_core::read_slot(buf, message_core::HEADER_LEN + f.offset).1
+}
+
+#[test]
+fn reader_before_the_nested_field_reads_a_newer_writer() {
+    let buf = sample_user().encode(); // Profile instances carry a v2 chain, by_id is shape=1
+    assert_ne!(by_id_raw_len(&buf) & message_core::SHAPE_BIT, 0);
+    assert_eq!(UserFlat::validate(&buf), Ok(()), "a newer nested writer is valid for an older reader");
+    let r = UserFlat::decode(&buf).unwrap();
+    assert_eq!(r.profile().bio(), "hello 世界");
+    assert_eq!(r.profile().nickname(), Some("yamada"));
+    assert_eq!(r.by_id().len(), 1);
+    assert_eq!(r.by_id().key(0), 7);
+    assert_eq!(r.by_id().value(0).bio(), "nested");
+    assert_eq!(r.points().get(1).y(), 7.25);
+    assert_eq!(r.to_owned(), flat_value());
+}
+
+#[test]
+fn reader_after_the_nested_field_reads_an_older_writer() {
+    let buf = flat_value().encode(); // no chains anywhere, by_id is shape=0 (open entries)
+    assert_eq!(by_id_raw_len(&buf) & message_core::SHAPE_BIT, 0);
+    assert_eq!(User::validate(&buf), Ok(()));
+    let r = User::decode(&buf).unwrap();
+    assert_eq!(r.profile().age(), 30);
+    assert_eq!(r.profile().verified(), None, "the nested since-field degrades to its default");
+    assert_eq!(r.by_id().value(0).bio(), "nested");
+    assert_eq!(r.by_id().value(0).verified(), None);
+    let owned = r.to_owned();
+    assert_eq!(owned.profile.verified, None);
+    assert_eq!(owned.by_id[&7].bio, "nested");
+}
+
+#[test]
+fn nested_since_field_round_trips_through_the_instance_chain() {
+    let u = sample_user();
+    let buf = u.encode();
+    let r = User::decode(&buf).unwrap();
+    assert_eq!(r.profile().verified(), Some(true));
+    assert_eq!(r.by_id().value(0).verified(), None);
+    assert_eq!(r.to_owned(), u);
+}
+
+#[test]
+fn unevolved_struct_arrays_stay_compact() {
+    let buf = sample_user().encode();
+    let f = User::__descriptor().fields.iter().find(|f| f.name == "points").unwrap();
+    let (_, l) = message_core::read_slot(&buf, message_core::HEADER_LEN + f.offset);
+    assert_eq!(l, 2, "no shape bit, element count only");
+    assert_eq!(f.element_size, Some(8), "Point footprints are inlined back to back");
 }

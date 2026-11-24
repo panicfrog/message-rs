@@ -99,7 +99,7 @@ fn slots_are_8_bytes_and_4_aligned() {
 }
 
 #[test]
-fn inline_struct_keeps_its_own_layout_including_bitmap() {
+fn struct_field_is_a_slot_to_a_self_contained_instance() {
     let mut set = SchemaSet {
         messages: vec![
             msg(
@@ -122,10 +122,12 @@ fn inline_struct_keeps_its_own_layout_including_bitmap() {
     let inner = set.message("Inner").unwrap();
     assert_eq!(inner.layout.fixed_len, 16);
     assert_eq!(inner.layout.max_align, 8);
+    // the parent never inlines the child: tag@0, inner slot@4 (align 4) -> 12
     let outer = set.message("Outer").unwrap();
-    assert_eq!(field(&set, "Outer", "inner").offset, 8);
-    assert_eq!(outer.layout.fixed_len, 24);
-    assert_eq!(outer.layout.max_align, 8);
+    let inner_f = field(&set, "Outer", "inner");
+    assert_eq!((inner_f.offset, inner_f.size, inner_f.slot), (4, 8, true));
+    assert_eq!(outer.layout.fixed_len, 12);
+    assert_eq!(outer.layout.max_align, 4);
 }
 
 #[test]
@@ -158,7 +160,7 @@ fn assert_array_field(set: &SchemaSet, m: &str, name: &str, size: usize, slot: b
 }
 
 #[test]
-fn fixed_array_of_structs_inlines_every_element() {
+fn fixed_array_of_structs_is_a_slot_with_the_open_stride() {
     let mut set = SchemaSet {
         messages: vec![
             msg(2, "Pt", vec![f("x", SimpleType::F32.into()), f("y", SimpleType::F32.into())]),
@@ -169,9 +171,8 @@ fn fixed_array_of_structs_inlines_every_element() {
     plan_schema(&mut set).unwrap();
     assert_eq!(set.message("Pt").unwrap().layout.fixed_len, 8);
     let pts = field(&set, "Shape", "pts");
-    assert_eq!(pts.size, 24);
-    assert!(!pts.slot);
-    assert_eq!(set.message("Shape").unwrap().layout.fixed_len, 24);
+    assert_eq!((pts.size, pts.slot, pts.element_size), (8, true, Some(8)));
+    assert_eq!(set.message("Shape").unwrap().layout.fixed_len, 8);
 }
 
 #[test]
@@ -213,35 +214,58 @@ fn versioned_fields_go_to_ext_blocks_and_base_is_frozen() {
 }
 
 #[test]
-fn evolved_struct_cannot_be_referenced() {
-    let mut set = SchemaSet {
+fn evolved_structs_can_be_referenced_and_flip_map_entries_to_instance_slots() {
+    let inner = |evolved: bool| {
+        let mut fields = vec![f("a", SimpleType::U32.into()), f("s", SimpleType::String.into())];
+        if evolved {
+            fields.push(f("b", SimpleType::U32.into()).since(2));
+        }
+        msg(2, "Inner", fields)
+    };
+    let set_of = |evolved: bool| SchemaSet {
         messages: vec![
-            msg(1, "Outer", vec![f("inner", Type::structure("Inner"))]),
             msg(
-                2,
-                "Inner",
+                1,
+                "Outer",
                 vec![
-                    f("a", SimpleType::U32.into()),
-                    f("b", SimpleType::U32.into()).since(2),
+                    f("inner", Type::structure("Inner")),
+                    f("list", Type::vec(Type::structure("Inner"))),
+                    f("by_id", Type::map(SimpleType::U64.into(), Type::structure("Inner"))),
                 ],
             ),
+            inner(evolved),
         ],
         enums: vec![],
     };
-    let err = plan_schema(&mut set).unwrap_err();
-    assert!(matches!(err, SchemaError::EvolvedStructInline(name) if name == "Inner"));
+    let flat = planned(set_of(false));
+    let evolved = planned(set_of(true));
+    for set in [&flat, &evolved] {
+        // the parent's own layout never depends on the child's evolution
+        assert_eq!(field(set, "Outer", "inner").offset, 0);
+        assert_eq!(set.message("Outer").unwrap().layout.fixed_len, 24);
+        // array stride is the open footprint (Inner's frozen fixed region) either way
+        assert_eq!(field(set, "Outer", "list").element_size, Some(12));
+    }
+    // map entries: open pair (u64 key + 12-byte value -> 24) vs instance pair (key + slot -> 16)
+    let open = field(&flat, "Outer", "by_id");
+    assert_eq!((open.element_size, open.map_value_offset), (Some(24), Some(8)));
+    let inst = field(&evolved, "Outer", "by_id");
+    assert_eq!((inst.element_size, inst.map_value_offset), (Some(16), Some(8)));
+    assert_eq!(evolved.message("Inner").unwrap().layout.ext_blocks.len(), 1);
 }
 
 #[test]
-fn inline_cycle_is_rejected() {
+fn reference_cycles_between_structs_are_legal() {
     let mut set = SchemaSet {
         messages: vec![
             msg(1, "A", vec![f("b", Type::structure("B"))]),
-            msg(2, "B", vec![f("a", Type::structure("A"))]),
+            msg(2, "B", vec![f("a", Type::structure("A")), f("n", SimpleType::U8.into())]),
         ],
         enums: vec![],
     };
-    assert!(matches!(plan_schema(&mut set), Err(SchemaError::InlineCycle(_))));
+    plan_schema(&mut set).unwrap();
+    assert_eq!(set.message("A").unwrap().layout.fixed_len, 8);
+    assert_eq!(set.message("B").unwrap().layout.fixed_len, 12);
 }
 
 #[test]
@@ -287,9 +311,34 @@ fn map_entry_stride_and_slot() {
     assert_eq!(field(&set, "M", "counts").element_size, Some(12));
     // V fixed_len = 12 (slot8 + u8@8 -> 9 -> round 4)
     assert_eq!(set.message("V").unwrap().layout.fixed_len, 12);
-    // u64 key @0(8), V @8(12), align 8 -> 24
+    // unevolved V is written open: u64 key @0(8), V fixed region @8(12), align 8 -> 24
     assert_eq!(field(&set, "M", "by_id").element_size, Some(24));
     assert!(field(&set, "M", "counts").slot);
+    let l = message_core::map_entry_layouts(&SimpleType::U64.into(), &Type::structure("V"), &set).unwrap();
+    assert_eq!((l.open_value_offset, l.open_stride), (8, 24));
+    assert_eq!((l.inst_value_offset, l.inst_stride), (8, 16));
+}
+
+#[test]
+fn bounded_ext_walk_never_leaves_the_instance() {
+    use message_core::{find_ext_block_bounded, INSTANCE_HV};
+    // [junk 4][instance: fixed 4 | v2 block: 4 bytes + trailer(2, 10)]
+    let mut buf = vec![0xAAu8; 4];
+    buf.extend_from_slice(&[1, 2, 3, 4]);
+    buf.extend_from_slice(&[9, 9, 9, 9, 2, 0, 10, 0, 0, 0]);
+    let (lo, hi) = (4, buf.len());
+    assert_eq!(find_ext_block_bounded(&buf, &[2], INSTANCE_HV, 2, 4, lo, hi), Some((8, 12)));
+    // a chain whose block_len claims to reach below the instance start is absent
+    buf[hi - 4] = 15;
+    assert_eq!(find_ext_block_bounded(&buf, &[2], INSTANCE_HV, 2, 0, lo, hi), None);
+    // instances without a chain degrade
+    assert_eq!(find_ext_block_bounded(&buf, &[2], INSTANCE_HV, 2, 0, 4, 8), None);
+}
+
+#[test]
+fn shape_bit_and_count_share_the_slot_length() {
+    assert_eq!(message_core::SHAPE_BIT | 3, 0x8000_0003);
+    assert_eq!(0x8000_0003u32 & message_core::LEN_MASK, 3);
 }
 
 #[test]

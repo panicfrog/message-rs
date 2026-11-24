@@ -148,24 +148,35 @@ pub fn slot_slice<'a>(payload: &'a [u8], off: u32, len: u32) -> &'a [u8] {
     &payload[off..off + len]
 }
 
-/// Locate the extension block of the target version by walking back from the payload end,
-/// returning its payload-relative range `[start, end)` (trailer excluded). `versions` lists all
-/// extension versions this reader knows (ascending); `header_version` is the writer's maximum;
-/// `min_len` is the block's fixed region (bitmap + fixed fields), so a block too short to hold
-/// its fields is treated as absent. Blocks newer than the target are stepped over even when this
-/// reader does not know them (an older reader must still find its own blocks behind a newer
-/// writer's). Corrupt data yields None (accessors degrade to defaults; strict checking goes
-/// through validate).
-pub fn find_ext_block(payload: &[u8], versions: &[u16], header_version: u8, target: u16, min_len: usize) -> Option<(usize, usize)> {
+/// Locate the extension block of the target version by walking back from `hi` (the payload end
+/// for top-level messages, the instance end for self-contained struct instances), returning its
+/// payload-relative range `[start, end)` (trailer excluded). The walk never crosses below `lo`
+/// (0 for top-level, the instance start for instances). `versions` lists all extension versions
+/// this reader knows (ascending); `header_version` is the writer's maximum — pass
+/// [`crate::INSTANCE_HV`] for instance readers, where no version is promised. `min_len` is the
+/// block's fixed region (bitmap + fixed fields), so a block too short to hold its fields is
+/// treated as absent. Blocks newer than the target are stepped over even when this reader does
+/// not know them (an older reader must still find its own blocks behind a newer writer's).
+/// Corrupt data yields None (accessors degrade to defaults; strict checking goes through
+/// validate).
+pub fn find_ext_block_bounded(
+    payload: &[u8],
+    versions: &[u16],
+    header_version: u8,
+    target: u16,
+    min_len: usize,
+    lo: usize,
+    hi: usize,
+) -> Option<(usize, usize)> {
     let max_known = versions.last().copied().unwrap_or(0);
-    let mut pos = payload.len();
+    let mut pos = hi;
     loop {
-        if pos < crate::EXT_TRAILER_LEN {
+        if pos < lo + crate::EXT_TRAILER_LEN {
             return None;
         }
         let since = read_u16(payload, pos - 6);
         let block_len = read_u32(payload, pos - 4) as usize;
-        if since < 2 || since > header_version as u16 || block_len < crate::EXT_TRAILER_LEN || block_len > pos {
+        if since < 2 || since > header_version as u16 || block_len < crate::EXT_TRAILER_LEN || block_len > pos - lo {
             return None;
         }
         let block_start = pos - block_len;
@@ -179,6 +190,11 @@ pub fn find_ext_block(payload: &[u8], versions: &[u16], header_version: u8, targ
         }
         return None;
     }
+}
+
+/// Top-level variant: the walk spans the whole payload and `header_version` is the promise.
+pub fn find_ext_block(payload: &[u8], versions: &[u16], header_version: u8, target: u16, min_len: usize) -> Option<(usize, usize)> {
+    find_ext_block_bounded(payload, versions, header_version, target, min_len, 0, payload.len())
 }
 
 // ---- Lazy views ----
@@ -350,28 +366,46 @@ impl<'a> BytesListView<'a> {
     }
 }
 
-/// Struct/enum list view (elements are contiguous fixed regions).
+/// Struct-element list view over an array region whose slot length carries the shape bit
+/// (`slot.len = SHAPE_BIT | count`). shape=0: elements are `T::FIXED_LEN`-stride contiguous
+/// fixed parts (open mode; their var data lives elsewhere and extension fields are absent, so
+/// readers get hv=0). shape=1: elements are 8-byte slots, each pointing at a self-contained
+/// instance whose extent `[lo, hi)` the element reader is bounded by (hv = [`crate::INSTANCE_HV`]).
 #[derive(Clone, Copy)]
-pub struct StructListView<'a, T: crate::traits::StructDecode> {
-    view: StrideView<'a>,
+pub struct StructEvoListView<'a, T: crate::traits::StructDecode> {
+    buf: &'a [u8],
+    start: usize,
+    raw_len: u32,
     _pd: std::marker::PhantomData<fn() -> T>,
 }
 
-impl<'a, T: crate::traits::StructDecode> StructListView<'a, T> {
-    pub fn new(buf: &'a [u8], start: usize, count: usize) -> Self {
-        let stride = <T as crate::traits::Fixed>::FIXED_LEN;
-        StructListView { view: StrideView::new(buf, start, count, stride), _pd: std::marker::PhantomData }
+impl<'a, T: crate::traits::StructDecode> StructEvoListView<'a, T> {
+    pub fn new(buf: &'a [u8], start: usize, raw_len: u32) -> Self {
+        StructEvoListView { buf, start, raw_len, _pd: std::marker::PhantomData }
     }
 
     pub fn len(&self) -> usize {
-        self.view.len()
+        (self.raw_len & crate::LEN_MASK) as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.view.is_empty()
+        self.len() == 0
+    }
+
+    /// Whether the elements are self-contained instances (shape bit set by the writer).
+    pub fn is_instance_mode(&self) -> bool {
+        self.raw_len & crate::SHAPE_BIT != 0
     }
 
     pub fn get(&self, i: usize) -> T::Reader<'a> {
-        T::__reader(self.view.buf, self.view.origin_of(i), 0)
+        assert!(i < self.len(), "index {i} out of bounds (len {})", self.len());
+        if self.is_instance_mode() {
+            let (o, l) = read_slot(self.buf, self.start + i * SLOT_LEN);
+            let lo = o as usize;
+            T::__reader(self.buf, lo, lo + l as usize, crate::INSTANCE_HV)
+        } else {
+            let stride = <T as crate::traits::Fixed>::FIXED_LEN;
+            T::__reader(self.buf, self.start + i * stride, self.buf.len(), 0)
+        }
     }
 }
