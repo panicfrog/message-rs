@@ -25,6 +25,17 @@ fn export_vectors(out: &str) -> i32 {
         })
     }
 
+    fn profile_json(p: &message_fixtures::Profile) -> Value {
+        json!({ "age": p.age, "bio": p.bio, "nickname": p.nickname, "verified": p.verified })
+    }
+
+    let pf = |age: u32| message_fixtures::Profile {
+        age,
+        bio: format!("bio{age}"),
+        nickname: None,
+        verified: Some(age % 2 == 0),
+    };
+
     let u = message_fixtures::sample_user();
     let hex: String = u.encode().iter().map(|b| format!("{b:02x}")).collect();
     let expected = json!({
@@ -79,6 +90,11 @@ fn export_vectors(out: &str) -> i32 {
             "labels": { "a": ["x", "y"], "b": [] },
             "aliases": ["al", "as"],
             "grid": [["g"], [], ["h", "i"]],
+            "groups": [
+                [profile_json(&pf(1)), profile_json(&pf(2))],
+                [],
+                [profile_json(&pf(3))],
+            ],
         },
     });
     let tally_out = std::path::Path::new(out).with_file_name("tally.json");

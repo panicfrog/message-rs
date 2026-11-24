@@ -356,17 +356,19 @@ class TallyReader(override val msg: RawMessage, override val origin: Int, overri
     val labels: LabelsMapView get() = msg.viewAt(origin + 8) { o, n -> LabelsMapView(msg, o, n) }
     val aliases: StringListView get() = msg.viewAt(origin + 16) { o, n -> StringListView(msg, o, n) }
     val grid: SlotListView get() = msg.viewAt(origin + 24) { o, n -> SlotListView(msg, o, n) }
+    val groups: SlotListView get() = msg.viewAt(origin + 32) { o, n -> SlotListView(msg, o, n) }
 
     fun toOwned(): Tally = Tally(
         usage = usage.associate { it.key to it.value },
         labels = labels.associate { it.key to it.value.toList() },
         aliases = aliases.toList(),
         grid = grid.map { s0 -> StringListView(msg, s0.offset.toInt(), s0.length.toInt()).toList() },
+        groups = groups.map { s0 -> StructEvoListView(msg, s0.offset.toInt(), (s0.length.toInt()).toLong(), 24) { m, p, e, h -> ProfileReader(m, p, e, h) }.map { it.toOwned() } },
     )
 
     companion object {
         val KEY: UInt = 5u
-        const val FIXED_LEN = 32
+        const val FIXED_LEN = 40
         val EXT_VERSIONS = intArrayOf()
 
         /// Lazy decode: null only when the buffer is too short or the key does not match.
@@ -416,15 +418,16 @@ data class Tally(
     val labels: Map<String, List<String>>,
     val aliases: List<String>,
     val grid: List<List<String>>,
+    val groups: List<List<Profile>>,
 ) {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
     fun encode(): ByteArray {
-        val w = Writer(40)
+        val w = Writer(48)
         w.reserve(8)
-        val base = w.reserve(32)
+        val base = w.reserve(40)
         __writeTallyBase(w, base, this)
         w.writeU32(0, TallyReader.KEY)
-        w.writeU16(4, 32u)
+        w.writeU16(4, 40u)
         w.writeU8(6, 0u)
         w.writeU8(7, 0u)
         return w.finish()
@@ -494,10 +497,26 @@ private fun __writeTallyBase(w: Writer, base: Int, value: Tally) {
         }
         w.writeSlot(base + 24, w.rel(r0), a0.size)
     }
+    run {
+        val a0 = value.groups
+        val r0 = w.reserve(a0.size * 8)
+        for (i0 in a0.indices) {
+            run {
+                val a1 = a0[i0]
+                val r1 = w.reserve(a1.size * 8)
+                for (i1 in a1.indices) {
+                    val s = __writeProfileInstance(w, a1[i1])
+                    w.writeSlot(r1 + i1 * 8, w.rel(s), w.length - s)
+                }
+                w.writeSlot(r0 + i0 * 8, w.rel(r1), a1.size or SHAPE_BIT)
+            }
+        }
+        w.writeSlot(base + 32, w.rel(r0), a0.size)
+    }
 }
 
 private fun __writeTallyInstance(w: Writer, value: Tally): Int {
-    val s = w.reserve(32)
+    val s = w.reserve(40)
     __writeTallyBase(w, s, value)
     return s
 }
@@ -533,6 +552,22 @@ private fun __validateTallyBase(m: RawMessage, base: Int, hv: Int) {
             val (o1, n1) = checkRegion(m, o0 + i0 * 8, 8, "grid", i0)
             for (i1 in 0 until n1) {
                 nest("grid", i1) { checkStrSlot(m, o1 + i1 * 8) }
+            }
+        }
+    }
+    run {
+        val (o0, n0) = checkRegion(m, base + 32, 8, "groups")
+        for (i0 in 0 until n0) {
+            val r1 = checkRegionShape(m, o0 + i0 * 8, "groups", i0)
+            if (r1.instances) {
+                for (i1 in 0 until r1.count) {
+                    nest("groups", i1) { checkInstance(m, r1.offset + i1 * 8).let { __validateProfileInst(m, it.lo, it.hi) } }
+                }
+            } else {
+                checkExtent(m, r1.offset, r1.count, 24, "groups", i0)
+                for (i1 in 0 until r1.count) {
+                    nest("groups", i1) { __validateProfileBase(m, r1.offset + i1 * 24, 0) }
+                }
             }
         }
     }

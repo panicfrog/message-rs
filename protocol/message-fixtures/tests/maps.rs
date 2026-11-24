@@ -1,7 +1,8 @@
 //! Enum-keyed maps and array-valued maps: encode order is canonical (sorted) and the views read
 //! both sides back; the planner must agree with the derive-computed entry stride.
 
-use message_fixtures::{sample_tally, Color, Tally};
+use message_core::StructEvoListView;
+use message_fixtures::{sample_tally, Color, Profile, Tally};
 
 #[test]
 fn enum_keyed_and_array_valued_maps_roundtrip() {
@@ -33,6 +34,24 @@ fn enum_keyed_and_array_valued_maps_roundtrip() {
     assert_eq!(inner(0).get(0), "g");
     assert_eq!(inner(1).len(), 0);
     assert_eq!(inner(2).get(1), "i");
+
+    // nested dynamic array of an evolved struct: the inner region slot carries the shape bit, so
+    // the inner region is per-element instance slots (regression: the derive once wrote it open;
+    // the outer slot is a plain slot list and never carries the bit)
+    assert_eq!(r.groups().len(), 3);
+    let group = |i: usize| {
+        let (o, l) = r.groups().slot_of(i);
+        assert!(l & message_core::SHAPE_BIT != 0, "inner region slot must carry the shape bit");
+        StructEvoListView::<Profile>::new(r.payload(), o as usize, l)
+    };
+    assert!(group(0).is_instance_mode());
+    assert_eq!(group(0).len(), 2);
+    assert_eq!(group(0).get(1).age(), 2);
+    assert_eq!(group(0).get(1).verified(), Some(true));
+    assert_eq!(group(0).get(0).verified(), Some(false));
+    assert_eq!(group(1).len(), 0);
+    assert_eq!(group(2).get(0).bio(), "bio3");
+    assert_eq!(Tally::validate(&buf), Ok(()));
 
     assert_eq!(r.to_owned(), t);
     assert_eq!(r.to_owned().encode(), buf, "canonical re-encode");

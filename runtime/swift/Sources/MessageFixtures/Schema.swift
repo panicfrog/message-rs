@@ -422,7 +422,7 @@ extension Profile {
 }
 public struct TallyReader: MessageReader {
   public static let KEY: UInt32 = 5
-  public static let fixedLen: Int = 32
+  public static let fixedLen: Int = 40
   public static let EXT_VERSIONS: [UInt16] = []
   /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
   public let msg: RawMessage
@@ -447,8 +447,9 @@ public struct TallyReader: MessageReader {
   public var labels: LabelsMapView { { let (o, l) = msg.readSlot(origin + 8); return LabelsMapView(msg: msg, start: Int(o), rawLen: l) }() }
   public var aliases: StringListView { { let (o, l) = msg.readSlot(origin + 16); return StringListView(msg: msg, start: Int(o), count: Int(l)) }() }
   public var grid: SlotListView { { let (o, l) = msg.readSlot(origin + 24); return SlotListView(msg: msg, start: Int(o), count: Int(l)) }() }
+  public var groups: SlotListView { { let (o, l) = msg.readSlot(origin + 32); return SlotListView(msg: msg, start: Int(o), count: Int(l)) }() }
   public func toOwned() -> Tally {
-    Tally(usage: usage.reduce(into: [Color: UInt32]()) { $0[$1.0] = $1.1 }, labels: labels.reduce(into: [String: [String]]()) { $0[$1.0] = Array($1.1) }, aliases: Array(aliases), grid: grid.map { __s0 in return Array(StringListView(msg: msg, start: Int(__s0.0), count: Int(__s0.1))) })
+    Tally(usage: usage.reduce(into: [Color: UInt32]()) { $0[$1.0] = $1.1 }, labels: labels.reduce(into: [String: [String]]()) { $0[$1.0] = Array($1.1) }, aliases: Array(aliases), grid: grid.map { __s0 in return Array(StringListView(msg: msg, start: Int(__s0.0), count: Int(__s0.1))) }, groups: groups.map { __s0 in return StructEvoListView<ProfileReader>(msg: msg, start: Int(__s0.0), rawLen: UInt32(Int(__s0.1))).map { $0.toOwned() } })
   }
 }
 public struct UsageMapView: Sequence {
@@ -508,11 +509,13 @@ public struct Tally: Equatable {
   public var labels: [String: [String]]
   public var aliases: [String]
   public var grid: [[String]]
-  public init(usage: [Color: UInt32], labels: [String: [String]], aliases: [String], grid: [[String]]) {
+  public var groups: [[Profile]]
+  public init(usage: [Color: UInt32], labels: [String: [String]], aliases: [String], grid: [[String]], groups: [[Profile]]) {
     self.usage = usage
     self.labels = labels
     self.aliases = aliases
     self.grid = grid
+    self.groups = groups
   }
 }
 func __writeTallyBase(_ w: inout Writer, _ base: Int, _ value: Tally) {
@@ -568,9 +571,25 @@ func __writeTallyBase(_ w: inout Writer, _ base: Int, _ value: Tally) {
     }
     w.writeSlot(base + 24, w.rel(r0), a0.count)
   }
+  do {
+    let a0 = value.groups
+    let r0 = w.reserve(a0.count * 8)
+    for (i0, v0) in a0.enumerated() {
+      do {
+        let a1 = v0
+        let r1 = w.reserve(a1.count * 8)
+        for (i1, v1) in a1.enumerated() {
+          let s = __writeProfileInstance(&w, v1)
+          w.writeSlot(r1 + i1 * 8, w.rel(s), w.length - s)
+        }
+        w.writeSlot(r0 + i0 * 8, w.rel(r1), Int(UInt32(a1.count) | SHAPE_BIT))
+      }
+    }
+    w.writeSlot(base + 32, w.rel(r0), a0.count)
+  }
 }
 func __writeTallyInstance(_ w: inout Writer, _ value: Tally) -> Int {
-  let s = w.reserve(32)
+  let s = w.reserve(40)
   __writeTallyBase(&w, s, value)
   return s
 }
@@ -618,6 +637,27 @@ func __validateTallyBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
       }
     }
   }
+  do {
+    let (o0, n0) = try checkRegion(m, base + 32, 8, "groups")
+    for i0 in 0..<n0 {
+      let (o1, n1, s1) = try checkRegionShape(m, o0 + i0 * 8, "groups", i0)
+      if s1 {
+        for i1 in 0..<n1 {
+          try nest("groups", i1) {
+            let (lo, hi) = try checkInstance(m, o1 + i1 * 8)
+            try __validateProfileInst(m, lo, hi)
+          }
+        }
+      } else {
+        try checkExtent(m, o1, n1, 24, "groups", i0)
+        for i1 in 0..<n1 {
+          try nest("groups", i1) {
+            try __validateProfileBase(m, o1 + i1 * 24, 0)
+          }
+        }
+      }
+    }
+  }
 }
 func __validateTallyInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   try __validateTallyBase(m, lo, INSTANCE_HV)
@@ -643,12 +683,12 @@ extension Tally {
   }
   /// Canonical encoding (byte-identical to Rust and TS): declaration-order var data, sorted map keys.
   public func encode() -> Data {
-    var w = Writer(capacity: 40)
+    var w = Writer(capacity: 48)
     w.reserve(8)
-    let base = w.reserve(32)
+    let base = w.reserve(40)
     __writeTallyBase(&w, base, self)
     w.writeU32(0, 5)
-    w.writeU16(4, 32)
+    w.writeU16(4, 40)
     w.writeU8(6, 0)
     w.writeU8(7, 0)
     return w.finish()

@@ -270,6 +270,11 @@ class TallyConformanceTests {
         labels = mapOf("a" to listOf("x", "y"), "b" to emptyList()),
         aliases = listOf("al", "as"),
         grid = listOf(listOf("g"), emptyList(), listOf("h", "i")),
+        groups = listOf(
+            listOf(Profile(1u, "bio1", null, false), Profile(2u, "bio2", null, true)),
+            emptyList(),
+            listOf(Profile(3u, "bio3", null, false)),
+        ),
     )
 
     @Test
@@ -292,6 +297,12 @@ class TallyConformanceTests {
         // nested dynamic array: each element is a slot pointing at an inner string-list region
         val inner = StringListView(r.msg, r.grid[2].offset.toInt(), r.grid[2].length.toInt())
         assertEquals(listOf("h", "i"), inner.toList())
+        // nested dynamic array of an evolved struct: the inner slot carries the shape bit (instance mode)
+        assertEquals(3, r.groups.size)
+        val group0 = StructEvoListView(r.msg, r.groups[0].offset.toInt(), r.groups[0].length.toInt().toLong(), 24) { m, p, e, h -> ProfileReader(m, p, e, h) }
+        assertTrue(group0.isInstanceMode)
+        assertEquals(2u, group0[1].age)
+        assertEquals(true, group0[1].verified)
         // map views iterate as entries
         assertEquals(listOf("a" to listOf("x", "y"), "b" to emptyList()), r.labels.map { it.key to it.value.toList() })
     }
@@ -314,6 +325,7 @@ class TallyConformanceTests {
             labels = linkedMapOf(high to listOf("high"), "�" to listOf("replacement")),
             aliases = emptyList(),
             grid = emptyList(),
+            groups = emptyList(),
         )
         val r = assertNotNull(TallyReader.decode(t.encode()))
         assertEquals(listOf("�", high), r.labels.map { it.key })

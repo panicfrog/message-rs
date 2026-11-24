@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { Tally, TallyReader, User, UserReader } from '../src/schema.js';
-import { StringListView } from '../src/runtime.js';
+import { ProfileReader, Tally, TallyReader, User, UserReader } from '../src/schema.js';
+import { StringListView, StructEvoListView } from '../src/runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../../..');
@@ -161,6 +161,13 @@ describe('Rust <-> TS conformance (enum-keyed / array-valued maps, fixed string 
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
     const [o, l] = r!.grid.slotOf(2);
     expect(new StringListView(payload, o, l).get(1)).toBe('i');
+    // nested dynamic array of an evolved struct: the inner slot carries the shape bit (instance mode)
+    expect(r!.groups.length).toBe(3);
+    const [go, gl] = r!.groups.slotOf(0);
+    const group0 = new StructEvoListView<ProfileReader>(payload, go, gl, 24, (dv2, o2, e2, hv2) => new ProfileReader(dv2, o2, e2, hv2));
+    expect(group0.length).toBe(2);
+    expect(group0.get(1).age).toBe(2);
+    expect(group0.get(1).verified).toBe(true);
   });
 
   it('encode: byte-identical to Rust with numeric-string enum keys', () => {
@@ -174,6 +181,11 @@ describe('Rust <-> TS conformance (enum-keyed / array-valued maps, fixed string 
     expect(t!.labels).toEqual({ a: ['x', 'y'], b: [] });
     expect(t!.aliases).toEqual(['al', 'as']);
     expect(t!.grid).toEqual([['g'], [], ['h', 'i']]);
+    expect(t!.groups).toEqual([
+      [{ age: 1, bio: 'bio1', nickname: null, verified: false }, { age: 2, bio: 'bio2', nickname: null, verified: true }],
+      [],
+      [{ age: 3, bio: 'bio3', nickname: null, verified: false }],
+    ]);
     expect(toHex(Tally.encode(t!))).toBe(tallyVector.hex);
     const byName = { ...t!, usage: { Red: 1, Blue: 3 } } as Tally;
     expect(toHex(Tally.encode(byName))).toBe(tallyVector.hex);

@@ -504,7 +504,7 @@ export namespace Profile {
 
 export class TallyReader {
   static readonly KEY = 5;
-  static readonly FIXED_LEN = 32;
+  static readonly FIXED_LEN = 40;
   static readonly EXT_VERSIONS: readonly number[] = [];
   static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
@@ -514,7 +514,7 @@ export class TallyReader {
   constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
 
   static decode(buf: Uint8Array): TallyReader | null {
-    if (buf.length < 8 + 32) return null;
+    if (buf.length < 8 + 40) return null;
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== TallyReader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
@@ -533,6 +533,9 @@ export class TallyReader {
   get grid(): SlotListView {
     { const [o, l] = readSlot(this.dv, this.origin + 24); return new SlotListView(this.dv, o, l); }
   }
+  get groups(): SlotListView {
+    { const [o, l] = readSlot(this.dv, this.origin + 32); return new SlotListView(this.dv, o, l); }
+  }
 
   toUser(): Tally {
     return {
@@ -540,6 +543,7 @@ export class TallyReader {
       labels: (() => { const o: Record<string, string[]> = {}; for (let i = 0; i < this.labels.length; i++) o[this.labels.key(i)] = (() => { const mv = this.labels.value(i); return Array.from({ length: mv.length }, (_, i) => mv.get(i)); })(); return o; })(),
       aliases: Array.from({ length: this.aliases.length }, (_, i) => this.aliases.get(i)),
       grid: Array.from({ length: this.grid.length }, (_, i) => { const [o, l] = this.grid.slotOf(i); const iv = new StringListView(this.dv, o, l); return Array.from({ length: iv.length }, (_, i) => iv.get(i)); }),
+      groups: Array.from({ length: this.groups.length }, (_, i) => { const [o, l] = this.groups.slotOf(i); const iv = new StructEvoListView<ProfileReader>(this.dv, o, l, 24, (dv2, o2, e2, hv2) => new ProfileReader(dv2, o2, e2, hv2)); return Array.from({ length: iv.length }, (_, i) => Profile.fromReader(iv.get(i))); }),
     };
   }
 }
@@ -600,10 +604,26 @@ function __writeTallyBase(w: Writer, base: number, value: Tally): void {
     }
     w.slot(base + 24, w.rel(r0), a0.length);
   }
+  {
+    const a0: Profile[][] = value.groups ?? [];
+    const r0 = w.reserve(a0.length * 8);
+    for (let i0 = 0; i0 < a0.length; i0++) {
+      {
+        const a1: Profile[] = a0[i0] ?? [];
+        const r1 = w.reserve(a1.length * 8);
+        for (let i1 = 0; i1 < a1.length; i1++) {
+          const s = __writeProfileInstance(w, a1[i1]);
+          w.slot(r1 + i1 * 8, w.rel(s), w.length - s);
+        }
+        w.slot(r0 + i0 * 8, w.rel(r1), (a1.length | SHAPE_BIT) >>> 0);
+      }
+    }
+    w.slot(base + 32, w.rel(r0), a0.length);
+  }
 }
 
 function __writeTallyInstance(w: Writer, value: Tally): number {
-  const s = w.reserve(32);
+  const s = w.reserve(40);
   __writeTallyBase(w, s, value);
   return s;
 }
@@ -646,6 +666,22 @@ function __validateTallyBase(dv: DataView, base: number, hv: number, path: Valid
       }
     }
   }
+  {
+    const [o0, n0] = vRegion(dv, base + 32, 8, path, 'groups');
+    for (let i0 = 0; i0 < n0; i0++) {
+      {
+        const [o1, n1, s1] = vRegionShape(dv, o0 + i0 * 8, path, 'groups', i0);
+        if (s1) {
+          for (let i1 = 0; i1 < n1; i1++) {
+            const [lo, hi] = vInstance(dv, o1 + i1 * 8, path, 'groups', i1); __validateProfileInst(dv, lo, hi, [...path, 'groups', i1]);
+          }
+        } else {
+          vExtent(dv, o1, n1, 24, path, 'groups', i0);
+          for (let i1 = 0; i1 < n1; i1++) __validateProfileBase(dv, o1 + i1 * 24, 0, [...path, 'groups', i1]);
+        }
+      }
+    }
+  }
 }
 function __validateTallyInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
   __validateTallyBase(dv, lo, INSTANCE_HV, path);
@@ -657,6 +693,7 @@ export interface Tally {
   labels: Record<string, string[]>;
   aliases: string[];
   grid: string[][];
+  groups: Profile[][];
 }
 
 export namespace Tally {
@@ -673,12 +710,12 @@ export namespace Tally {
     /** Strictly check an untrusted buffer; after null no getter can throw. */
     export function validate(buf: Uint8Array): ValidationError | null {
       try {
-        if (buf.length < 40) throw new ValidationError(`buffer too short: need 40 bytes, got ${buf.length}`);
+        if (buf.length < 48) throw new ValidationError(`buffer too short: need 48 bytes, got ${buf.length}`);
         const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
         const key = full.getUint32(0, true);
         if (key !== 5) throw new ValidationError(`key mismatch: expected 5, got ${key}`);
         const fl = full.getUint16(4, true);
-        if (fl !== 32) throw new ValidationError(`header fixed_len mismatch: expected 32, got ${fl}`);
+        if (fl !== 40) throw new ValidationError(`header fixed_len mismatch: expected 40, got ${fl}`);
         const hv = full.getUint8(6);
         const dv = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
         const path: ValidationPath = [];
@@ -692,12 +729,12 @@ export namespace Tally {
 
     /** Canonical encoding (byte-identical to Rust): declaration-order var data, sorted map keys. */
     export function encode(value: Tally): Uint8Array {
-      const w = new Writer(40);
+      const w = new Writer(48);
       w.reserve(8);
-      const base = w.reserve(32);
+      const base = w.reserve(40);
       __writeTallyBase(w, base, value);
       w.u32(0, 5);
-      w.u16(4, 32);
+      w.u16(4, 40);
       w.u8(6, 0);
       w.u8(7, 0);
       return w.finish();

@@ -814,6 +814,26 @@ fn emit_value_write(kind: &TyKind, val: &str, pos: &str, field: &str) -> String 
     }
 }
 
+/// Element footprint inside an array region plus the shape bit a writer puts into the region
+/// slot's length. Struct elements are open (fixed-stride footprints) until the type gains
+/// extension fields, after which new writers emit per-element instance slots (shape bit set).
+fn elem_stride_and_shape(elem: &TyKind) -> (String, String) {
+    match elem {
+        TyKind::Path(p) => {
+            let t = ty_str(p);
+            (
+                format!(
+                    "(if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ <{t} as ::message_core::Fixed>::FIXED_LEN }} else {{ 8usize }})"
+                ),
+                format!(
+                    "(if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ 0u32 }} else {{ ::message_core::SHAPE_BIT }})"
+                ),
+            )
+        }
+        _ => (element_size_str(elem).unwrap_or_else(|_| "8usize".into()), "0u32".to_string()),
+    }
+}
+
 fn emit_array_write(val: &str, elem: &TyKind, fixed: Option<u32>, pos: &str) -> String {
     let inline = fixed.is_some() && !is_slot_shaped(elem);
     if inline {
@@ -834,22 +854,7 @@ fn emit_array_write(val: &str, elem: &TyKind, fixed: Option<u32>, pos: &str) -> 
             }
         }
     } else {
-        // Struct elements are open (fixed-stride footprints) until the type gains extension
-        // fields, after which new writers emit per-element instance slots (shape bit set).
-        let (stride, shape) = match elem {
-            TyKind::Path(p) => {
-                let t = ty_str(p);
-                (
-                    format!(
-                        "(if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ <{t} as ::message_core::Fixed>::FIXED_LEN }} else {{ 8usize }})"
-                    ),
-                    format!(
-                        "(if <{t} as ::message_core::Fixed>::IS_ENUM || !<{t} as ::message_core::Fixed>::HAS_EXT {{ 0u32 }} else {{ ::message_core::SHAPE_BIT }})"
-                    ),
-                )
-            }
-            _ => (element_size_str(elem).unwrap_or_else(|_| "8usize".into()), "0u32".to_string()),
-        };
+        let (stride, shape) = elem_stride_and_shape(elem);
         format!(
             "{{\n    let __n = ({val}).len();\n    let __shape: u32 = {shape};\n    let __r0 = buf.reserve(__n * {stride});\n    {}\n    {}\n}}",
             emit_elem_loop(val, elem, "__r0", 0),
@@ -886,12 +891,18 @@ fn emit_elem_loop(arr: &str, elem: &TyKind, region: &str, depth: usize) -> Strin
             )
         }
         TyKind::Array { elem: inner, fixed: _ } => {
-            let inner_stride = element_size_str(inner).unwrap_or_else(|_| "8usize".into());
+            // a nested dynamic array is itself a region slot, so it carries the shape bit too
+            let (inner_stride, inner_shape) = elem_stride_and_shape(inner);
             let ir = format!("__r{}", depth + 1);
+            let shape_var = format!("__shape{depth}");
             format!(
-                "{{ let __m = {ev}.len(); let {ir} = buf.reserve(__m * {inner_stride}); {} {} }}",
+                "{{ let __m = {ev}.len(); let {shape_var}: u32 = {inner_shape}; let {ir} = buf.reserve(__m * {inner_stride}); {} {} }}",
                 emit_elem_loop(&ev.clone(), inner, &ir, depth + 1),
-                slot_patch(&format!("{region} + {idx} * 8usize"), &format!("buf.payload_rel({ir})"), "__m")
+                slot_patch(
+                    &format!("{region} + {idx} * 8usize"),
+                    &format!("buf.payload_rel({ir})"),
+                    &format!("(__m as u32 | {shape_var})")
+                )
             )
         }
         TyKind::Map { .. } => String::new(),

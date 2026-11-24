@@ -232,11 +232,33 @@
           "size": 8,
           "slot": true,
           "elementSize": 8
+        },
+        {
+          "name": "groups",
+          "type": {
+            "array": {
+              "elem": {
+                "array": {
+                  "elem": {
+                    "struct": "Profile"
+                  },
+                  "fixed": null
+                }
+              },
+              "fixed": null
+            }
+          },
+          "since": 1,
+          "doc": "Nested dynamic array of an evolved struct: both region slots carry the shape bit.",
+          "offset": 32,
+          "size": 8,
+          "slot": true,
+          "elementSize": 8
         }
       ],
       "layout": {
         "bitmapLen": 0,
-        "fixedLen": 32,
+        "fixedLen": 40,
         "maxAlign": 4
       }
     },

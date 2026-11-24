@@ -155,7 +155,11 @@ struct UserConformance {
 @Suite("Rust <-> Swift conformance (enum-keyed / array-valued maps, fixed string arrays, nested arrays)")
 struct TallyConformance {
     private func sampleTally() -> Tally {
-        Tally(usage: [.blue: 3, .red: 1], labels: ["a": ["x", "y"], "b": []], aliases: ["al", "as"], grid: [["g"], [], ["h", "i"]])
+        Tally(
+            usage: [.blue: 3, .red: 1], labels: ["a": ["x", "y"], "b": []], aliases: ["al", "as"],
+            grid: [["g"], [], ["h", "i"]],
+            groups: [[Profile(age: 1, bio: "bio1", nickname: nil, verified: false), Profile(age: 2, bio: "bio2", nickname: nil, verified: true)], [], [Profile(age: 3, bio: "bio3", nickname: nil, verified: false)]]
+        )
     }
 
     @Test func decodeMatchesRustEncodedBytes() throws {
@@ -178,6 +182,13 @@ struct TallyConformance {
         let s = r.grid.slot(at: 2)
         let inner = StringListView(msg: r.msg, start: Int(s.0), count: Int(s.1))
         #expect(Array(inner) == ["h", "i"])
+        // nested dynamic array of an evolved struct: the inner slot carries the shape bit (instance mode)
+        #expect(r.groups.count == 3)
+        let g = r.groups.slot(at: 0)
+        let group0 = StructEvoListView<ProfileReader>(msg: r.msg, start: Int(g.0), rawLen: g.1)
+        #expect(group0.count == 2)
+        #expect(group0[1].age == 2)
+        #expect(group0[1].verified == true)
     }
 
     @Test func handWrittenValueEncodesToTheRustBytes() throws {

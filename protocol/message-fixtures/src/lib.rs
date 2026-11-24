@@ -60,6 +60,8 @@ pub struct Tally {
     pub labels: std::collections::HashMap<String, Vec<String>>,
     pub aliases: [String; 2],
     pub grid: Vec<Vec<String>>,
+    /// Nested dynamic array of an evolved struct: both region slots carry the shape bit.
+    pub groups: Vec<Vec<Profile>>,
 }
 
 /// Sample data for [`Tally`] (shared by tests and the conformance vectors).
@@ -70,11 +72,18 @@ pub fn sample_tally() -> Tally {
     let mut labels = std::collections::HashMap::new();
     labels.insert("a".to_string(), vec!["x".to_string(), "y".to_string()]);
     labels.insert("b".to_string(), vec![]);
+    let profile = |age: u32| Profile {
+        age,
+        bio: format!("bio{age}"),
+        nickname: None,
+        verified: Some(age % 2 == 0),
+    };
     Tally {
         usage,
         labels,
         aliases: ["al".to_string(), "as".to_string()],
         grid: vec![vec!["g".to_string()], vec![], vec!["h".to_string(), "i".to_string()]],
+        groups: vec![vec![profile(1), profile(2)], vec![], vec![profile(3)]],
     }
 }
 
