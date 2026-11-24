@@ -80,9 +80,35 @@
       }
     },
     {
+      "key": 6,
+      "name": "Point",
+      "doc": "Small unevolved struct: arrays of it stay compact (shape=0, no per-element cost).",
+      "fields": [
+        {
+          "name": "x",
+          "type": "f32",
+          "since": 1,
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "y",
+          "type": "f32",
+          "since": 1,
+          "offset": 4,
+          "size": 4
+        }
+      ],
+      "layout": {
+        "bitmapLen": 0,
+        "fixedLen": 8,
+        "maxAlign": 4
+      }
+    },
+    {
       "key": 2,
       "name": "Profile",
-      "doc": "Inline nested struct (with an optional bitmap and string slots).",
+      "doc": "Nested struct (with an optional bitmap and string slots) that itself evolves: `verified`\nlives in the instance's own extension chain, so every container of Profile (field, map\nvalue) flips to instance mode once this schema is deployed.",
       "fields": [
         {
           "name": "age",
@@ -108,12 +134,28 @@
           "size": 8,
           "optionalBit": 0,
           "slot": true
+        },
+        {
+          "name": "verified",
+          "type": "bool",
+          "optional": true,
+          "since": 2,
+          "offset": 4,
+          "size": 1,
+          "optionalBit": 0
         }
       ],
       "layout": {
         "bitmapLen": 4,
         "fixedLen": 24,
-        "maxAlign": 4
+        "maxAlign": 4,
+        "extBlocks": [
+          {
+            "version": 2,
+            "bitmapLen": 4,
+            "fixedLen": 8
+          }
+        ]
       }
     },
     {
@@ -234,7 +276,8 @@
           },
           "since": 1,
           "offset": 28,
-          "size": 24
+          "size": 8,
+          "slot": true
         },
         {
           "name": "matrix",
@@ -245,7 +288,7 @@
             }
           },
           "since": 1,
-          "offset": 52,
+          "offset": 36,
           "size": 16,
           "elementSize": 4
         },
@@ -258,7 +301,7 @@
             }
           },
           "since": 1,
-          "offset": 68,
+          "offset": 52,
           "size": 8,
           "slot": true,
           "elementSize": 4
@@ -272,7 +315,7 @@
             }
           },
           "since": 1,
-          "offset": 76,
+          "offset": 60,
           "size": 8,
           "slot": true,
           "elementSize": 8
@@ -286,7 +329,7 @@
             }
           },
           "since": 1,
-          "offset": 84,
+          "offset": 68,
           "size": 8,
           "slot": true,
           "elementSize": 8
@@ -302,10 +345,26 @@
             }
           },
           "since": 1,
-          "offset": 92,
+          "offset": 76,
           "size": 8,
           "slot": true,
           "elementSize": 12
+        },
+        {
+          "name": "points",
+          "type": {
+            "array": {
+              "elem": {
+                "struct": "Point"
+              },
+              "fixed": null
+            }
+          },
+          "since": 1,
+          "offset": 84,
+          "size": 8,
+          "slot": true,
+          "elementSize": 8
         },
         {
           "name": "counts",
@@ -316,7 +375,7 @@
             }
           },
           "since": 1,
-          "offset": 100,
+          "offset": 92,
           "size": 8,
           "slot": true,
           "elementSize": 12,
@@ -333,10 +392,10 @@
             }
           },
           "since": 1,
-          "offset": 108,
+          "offset": 100,
           "size": 8,
           "slot": true,
-          "elementSize": 32,
+          "elementSize": 16,
           "mapValueOffset": 8
         },
         {
@@ -344,7 +403,7 @@
           "type": "bytes",
           "optional": true,
           "since": 1,
-          "offset": 116,
+          "offset": 108,
           "size": 8,
           "optionalBit": 0,
           "slot": true
@@ -354,7 +413,7 @@
           "type": "string",
           "optional": true,
           "since": 1,
-          "offset": 124,
+          "offset": 116,
           "size": 8,
           "optionalBit": 1,
           "slot": true
@@ -363,42 +422,42 @@
           "name": "stamp",
           "type": "i64",
           "since": 1,
-          "offset": 136,
+          "offset": 128,
           "size": 8
         },
         {
           "name": "ratio",
           "type": "f64",
           "since": 1,
-          "offset": 144,
+          "offset": 136,
           "size": 8
         },
         {
           "name": "flag",
           "type": "bool",
           "since": 1,
-          "offset": 152,
+          "offset": 144,
           "size": 1
         },
         {
           "name": "small",
           "type": "u8",
           "since": 1,
-          "offset": 153,
+          "offset": 145,
           "size": 1
         },
         {
           "name": "wide",
           "type": "u16",
           "since": 1,
-          "offset": 154,
+          "offset": 146,
           "size": 2
         },
         {
           "name": "offset",
           "type": "i16",
           "since": 1,
-          "offset": 156,
+          "offset": 148,
           "size": 2
         },
         {
@@ -407,7 +466,7 @@
           "since": 1,
           "doc": "Precise u64: maps to bigint on the TS side.",
           "precise": true,
-          "offset": 160,
+          "offset": 152,
           "size": 8
         },
         {
@@ -455,7 +514,7 @@
       ],
       "layout": {
         "bitmapLen": 4,
-        "fixedLen": 168,
+        "fixedLen": 160,
         "maxAlign": 8,
         "extBlocks": [
           {

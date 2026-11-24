@@ -16,7 +16,7 @@ enum class Color(override val value: Int) : MessageEnum {
     }
 }
 
-class LegacyReader(override val msg: RawMessage, override val origin: Int, override val hv: Int) : MessageReader {
+class LegacyReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {
     val id: UInt get() = msg.readU32(origin + 0)
     val note: String get() = msg.readString(origin + 16)
 
@@ -33,7 +33,7 @@ class LegacyReader(override val msg: RawMessage, override val origin: Int, overr
         /// Lazy decode: null only when the buffer is too short or the key does not match.
         fun decode(bytes: ByteArray): LegacyReader? {
             val m = RawMessage.decode(bytes, KEY, FIXED_LEN) ?: return null
-            return LegacyReader(m, 0, m.version)
+            return LegacyReader(m, 0, m.payloadSize, m.version)
         }
     }
 }
@@ -71,13 +71,24 @@ private fun __writeLegacyBase(w: Writer, base: Int, value: Legacy) {
     w.writeStringSlot(base + 16, value.note)
 }
 
+private fun __writeLegacyInstance(w: Writer, value: Legacy): Int {
+    val s = w.reserve(24)
+    __writeLegacyBase(w, s, value)
+    return s
+}
+
 private fun __validateLegacyBase(m: RawMessage, base: Int, hv: Int) {
     nest("note") { checkStrSlot(m, base + 16) }
 }
 
-class NodeReader(override val msg: RawMessage, override val origin: Int, override val hv: Int) : MessageReader {
+@Suppress("UNUSED_PARAMETER")
+private fun __validateLegacyInst(m: RawMessage, lo: Int, hi: Int) {
+    __validateLegacyBase(m, lo, INSTANCE_HV)
+}
+
+class NodeReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {
     val value: UInt get() = msg.readU32(origin + 0)
-    val children: StructListView<NodeReader> get() = msg.viewAt(origin + 4) { o, n -> StructListView(msg, o, n, 12) { m, p, h -> NodeReader(m, p, h) } }
+    val children: StructEvoListView<NodeReader> get() = msg.viewAt(origin + 4) { o, n -> StructEvoListView(msg, o, (n).toLong(), 12) { m, p, e, h -> NodeReader(m, p, e, h) } }
 
     fun toOwned(): Node = Node(
         value = value,
@@ -92,7 +103,7 @@ class NodeReader(override val msg: RawMessage, override val origin: Int, overrid
         /// Lazy decode: null only when the buffer is too short or the key does not match.
         fun decode(bytes: ByteArray): NodeReader? {
             val m = RawMessage.decode(bytes, KEY, FIXED_LEN) ?: return null
-            return NodeReader(m, 0, m.version)
+            return NodeReader(m, 0, m.payloadSize, m.version)
         }
     }
 }
@@ -137,36 +148,129 @@ private fun __writeNodeBase(w: Writer, base: Int, value: Node) {
     }
 }
 
+private fun __writeNodeInstance(w: Writer, value: Node): Int {
+    val s = w.reserve(12)
+    __writeNodeBase(w, s, value)
+    return s
+}
+
 private fun __validateNodeBase(m: RawMessage, base: Int, hv: Int) {
     run {
-        val (o0, n0) = checkRegion(m, base + 4, 12, "children")
-        for (i0 in 0 until n0) {
-            nest("children", i0) { __validateNodeBase(m, o0 + i0 * 12, hv) }
+        val r0 = checkRegionShape(m, base + 4, "children")
+        if (r0.instances) {
+            for (i0 in 0 until r0.count) {
+                nest("children", i0) { checkInstance(m, r0.offset + i0 * 8).let { __validateNodeInst(m, it.lo, it.hi) } }
+            }
+        } else {
+            checkExtent(m, r0.offset, r0.count, 12, "children")
+            for (i0 in 0 until r0.count) {
+                nest("children", i0) { __validateNodeBase(m, r0.offset + i0 * 12, 0) }
+            }
         }
     }
 }
 
-class ProfileReader(override val msg: RawMessage, override val origin: Int, override val hv: Int) : MessageReader {
+@Suppress("UNUSED_PARAMETER")
+private fun __validateNodeInst(m: RawMessage, lo: Int, hi: Int) {
+    __validateNodeBase(m, lo, INSTANCE_HV)
+}
+
+class PointReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {
+    val x: Float get() = msg.readF32(origin + 0)
+    val y: Float get() = msg.readF32(origin + 4)
+
+    fun toOwned(): Point = Point(
+        x = x,
+        y = y,
+    )
+
+    companion object {
+        val KEY: UInt = 6u
+        const val FIXED_LEN = 8
+        val EXT_VERSIONS = intArrayOf()
+
+        /// Lazy decode: null only when the buffer is too short or the key does not match.
+        fun decode(bytes: ByteArray): PointReader? {
+            val m = RawMessage.decode(bytes, KEY, FIXED_LEN) ?: return null
+            return PointReader(m, 0, m.payloadSize, m.version)
+        }
+    }
+}
+
+data class Point(
+    val x: Float,
+    val y: Float,
+) {
+    /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
+    fun encode(): ByteArray {
+        val w = Writer(16)
+        w.reserve(8)
+        val base = w.reserve(8)
+        __writePointBase(w, base, this)
+        w.writeU32(0, PointReader.KEY)
+        w.writeU16(4, 8u)
+        w.writeU8(6, 0u)
+        w.writeU8(7, 0u)
+        return w.finish()
+    }
+
+    companion object {
+        fun decode(bytes: ByteArray): PointReader? = PointReader.decode(bytes)
+        fun fromBytes(bytes: ByteArray): Point? = PointReader.decode(bytes)?.toOwned()
+        /// Strictly check an untrusted buffer; after null no accessor can throw on it.
+        fun validate(bytes: ByteArray): ValidationError? = runValidation {
+            val m = RawMessage.validating(bytes, PointReader.KEY, PointReader.FIXED_LEN)
+            __validatePointBase(m, 0, m.version)
+        }
+    }
+}
+
+private fun __writePointBase(w: Writer, base: Int, value: Point) {
+    w.writeF32(base + 0, value.x)
+    w.writeF32(base + 4, value.y)
+}
+
+private fun __writePointInstance(w: Writer, value: Point): Int {
+    val s = w.reserve(8)
+    __writePointBase(w, s, value)
+    return s
+}
+
+private fun __validatePointBase(m: RawMessage, base: Int, hv: Int) {
+}
+
+@Suppress("UNUSED_PARAMETER")
+private fun __validatePointInst(m: RawMessage, lo: Int, hi: Int) {
+    __validatePointBase(m, lo, INSTANCE_HV)
+}
+
+class ProfileReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {
     val age: UInt get() = msg.readU32(origin + 4)
     val bio: String get() = msg.readString(origin + 8)
     val nickname: String?
         get() = if (msg.bitmapBit(origin, 0)) msg.readString(origin + 16) else null
+    val verified: Boolean?
+        get() {
+            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 8, origin, end) ?: return null
+            return if (msg.bitmapBit(bs, 0)) msg.readBool(bs + 4) else null
+        }
 
     fun toOwned(): Profile = Profile(
         age = age,
         bio = bio,
         nickname = nickname,
+        verified = verified,
     )
 
     companion object {
         val KEY: UInt = 2u
         const val FIXED_LEN = 24
-        val EXT_VERSIONS = intArrayOf()
+        val EXT_VERSIONS = intArrayOf(2)
 
         /// Lazy decode: null only when the buffer is too short or the key does not match.
         fun decode(bytes: ByteArray): ProfileReader? {
             val m = RawMessage.decode(bytes, KEY, FIXED_LEN) ?: return null
-            return ProfileReader(m, 0, m.version)
+            return ProfileReader(m, 0, m.payloadSize, m.version)
         }
     }
 }
@@ -175,6 +279,7 @@ data class Profile(
     val age: UInt,
     val bio: String,
     val nickname: String?,
+    val verified: Boolean?,
 ) {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
     fun encode(): ByteArray {
@@ -182,9 +287,10 @@ data class Profile(
         w.reserve(8)
         val base = w.reserve(24)
         __writeProfileBase(w, base, this)
+        __writeProfileExt(w, this)
         w.writeU32(0, ProfileReader.KEY)
         w.writeU16(4, 24u)
-        w.writeU8(6, 0u)
+        w.writeU8(6, 2u)
         w.writeU8(7, 0u)
         return w.finish()
     }
@@ -196,6 +302,9 @@ data class Profile(
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, ProfileReader.KEY, ProfileReader.FIXED_LEN)
             __validateProfileBase(m, 0, m.version)
+            if (m.version >= 2) {
+                __validateProfileV2(m, checkExtBlock(m, ProfileReader.EXT_VERSIONS, m.version, 2, 8), m.version)
+            }
         }
     }
 }
@@ -209,6 +318,24 @@ private fun __writeProfileBase(w: Writer, base: Int, value: Profile) {
     }
 }
 
+private fun __writeProfileExt(w: Writer, value: Profile) {
+    run {
+        val blk = w.reserve(8)
+        value.verified?.let { v ->
+            w.setBit(blk, 0)
+            w.writeBool(blk + 4, v)
+        }
+        w.writeTrailer(blk, 2)
+    }
+}
+
+private fun __writeProfileInstance(w: Writer, value: Profile): Int {
+    val s = w.reserve(24)
+    __writeProfileBase(w, s, value)
+    __writeProfileExt(w, value)
+    return s
+}
+
 private fun __validateProfileBase(m: RawMessage, base: Int, hv: Int) {
     nest("bio") { checkStrSlot(m, base + 8) }
     if (m.bitmapBit(base, 0)) {
@@ -216,7 +343,15 @@ private fun __validateProfileBase(m: RawMessage, base: Int, hv: Int) {
     }
 }
 
-class TallyReader(override val msg: RawMessage, override val origin: Int, override val hv: Int) : MessageReader {
+private fun __validateProfileV2(m: RawMessage, base: Int, hv: Int) {
+}
+
+private fun __validateProfileInst(m: RawMessage, lo: Int, hi: Int) {
+    __validateProfileBase(m, lo, INSTANCE_HV)
+    m.findExtBlock(ProfileReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo, hi)?.let { __validateProfileV2(m, it, INSTANCE_HV) }
+}
+
+class TallyReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {
     val usage: UsageMapView get() = msg.viewAt(origin + 0) { o, n -> UsageMapView(msg, o, n) }
     val labels: LabelsMapView get() = msg.viewAt(origin + 8) { o, n -> LabelsMapView(msg, o, n) }
     val aliases: StringListView get() = msg.viewAt(origin + 16) { o, n -> StringListView(msg, o, n) }
@@ -237,43 +372,43 @@ class TallyReader(override val msg: RawMessage, override val origin: Int, overri
         /// Lazy decode: null only when the buffer is too short or the key does not match.
         fun decode(bytes: ByteArray): TallyReader? {
             val m = RawMessage.decode(bytes, KEY, FIXED_LEN) ?: return null
-            return TallyReader(m, 0, m.version)
+            return TallyReader(m, 0, m.payloadSize, m.version)
         }
     }
 }
 
-class UsageMapView(val msg: RawMessage, val start: Int, override val size: Int) : AbstractList<Map.Entry<Color, UInt>>() {
+class UsageMapView(val msg: RawMessage, val start: Int, private val rawLen: Int) : AbstractList<Map.Entry<Color, UInt>>() {
+    override val size: Int get() = rawLen and LEN_MASK
+    private val inst: Boolean get() = (rawLen and SHAPE_BIT) != 0
+    private val stride: Int get() = 8
+    private val vOff: Int get() = 4
     override fun get(index: Int): Map.Entry<Color, UInt> = entry(index)
     fun key(i: Int): Color {
         checkIndex(i, size)
-        return Color.read(msg, start + i * STRIDE)
+        return Color.read(msg, start + i * stride)
     }
     fun value(i: Int): UInt {
         checkIndex(i, size)
-        return msg.readU32(start + i * STRIDE + V_OFF)
+        return msg.readU32(start + i * stride + vOff)
     }
     fun entry(i: Int): Map.Entry<Color, UInt> = MapEntry(key(i), value(i))
-    companion object {
-        private const val STRIDE = 8
-        private const val V_OFF = 4
-    }
 }
 
-class LabelsMapView(val msg: RawMessage, val start: Int, override val size: Int) : AbstractList<Map.Entry<String, StringListView>>() {
+class LabelsMapView(val msg: RawMessage, val start: Int, private val rawLen: Int) : AbstractList<Map.Entry<String, StringListView>>() {
+    override val size: Int get() = rawLen and LEN_MASK
+    private val inst: Boolean get() = (rawLen and SHAPE_BIT) != 0
+    private val stride: Int get() = 16
+    private val vOff: Int get() = 8
     override fun get(index: Int): Map.Entry<String, StringListView> = entry(index)
     fun key(i: Int): String {
         checkIndex(i, size)
-        return msg.readString(start + i * STRIDE)
+        return msg.readString(start + i * stride)
     }
     fun value(i: Int): StringListView {
         checkIndex(i, size)
-        return msg.viewAt(start + i * STRIDE + V_OFF) { o, n -> StringListView(msg, o, n) }
+        return msg.viewAt(start + i * stride + vOff) { o, n -> StringListView(msg, o, n) }
     }
     fun entry(i: Int): Map.Entry<String, StringListView> = MapEntry(key(i), value(i))
-    companion object {
-        private const val STRIDE = 16
-        private const val V_OFF = 8
-    }
 }
 
 data class Tally(
@@ -361,6 +496,12 @@ private fun __writeTallyBase(w: Writer, base: Int, value: Tally) {
     }
 }
 
+private fun __writeTallyInstance(w: Writer, value: Tally): Int {
+    val s = w.reserve(32)
+    __writeTallyBase(w, s, value)
+    return s
+}
+
 private fun __validateTallyBase(m: RawMessage, base: Int, hv: Int) {
     run {
         val (o0, n0) = checkRegion(m, base + 0, 8, "usage")
@@ -397,47 +538,53 @@ private fun __validateTallyBase(m: RawMessage, base: Int, hv: Int) {
     }
 }
 
-class UserReader(override val msg: RawMessage, override val origin: Int, override val hv: Int) : MessageReader {
+@Suppress("UNUSED_PARAMETER")
+private fun __validateTallyInst(m: RawMessage, lo: Int, hi: Int) {
+    __validateTallyBase(m, lo, INSTANCE_HV)
+}
+
+class UserReader(override val msg: RawMessage, override val origin: Int, override val end: Int, override val hv: Int) : MessageReader {
     val id: ULong get() = msg.readU64(origin + 8)
     val name: String get() = msg.readString(origin + 16)
     val color: Color get() = Color.read(msg, origin + 24)
-    val profile: ProfileReader get() = ProfileReader(msg, origin + 28, hv)
-    val matrix: ScalarListView<Float> get() = ScalarListView(msg, origin + 52, 4, MessageScalar.F32)
-    val nums: ScalarListView<Int> get() = msg.viewAt(origin + 68) { o, n -> ScalarListView(msg, o, n, MessageScalar.I32) }
-    val tags: StringListView get() = msg.viewAt(origin + 76) { o, n -> StringListView(msg, o, n) }
-    val blobs: BytesListView get() = msg.viewAt(origin + 84) { o, n -> BytesListView(msg, o, n) }
-    val edges: StructListView<NodeReader> get() = msg.viewAt(origin + 92) { o, n -> StructListView(msg, o, n, 12) { m, p, h -> NodeReader(m, p, h) } }
-    val counts: CountsMapView get() = msg.viewAt(origin + 100) { o, n -> CountsMapView(msg, o, n) }
-    val byId: ByIdMapView get() = msg.viewAt(origin + 108) { o, n -> ByIdMapView(msg, o, n) }
+    val profile: ProfileReader get() = msg.readSlot(origin + 28).let { s -> ProfileReader(msg, s.offset.toInt(), (s.offset + s.length).toInt(), INSTANCE_HV) }
+    val matrix: ScalarListView<Float> get() = ScalarListView(msg, origin + 36, 4, MessageScalar.F32)
+    val nums: ScalarListView<Int> get() = msg.viewAt(origin + 52) { o, n -> ScalarListView(msg, o, n, MessageScalar.I32) }
+    val tags: StringListView get() = msg.viewAt(origin + 60) { o, n -> StringListView(msg, o, n) }
+    val blobs: BytesListView get() = msg.viewAt(origin + 68) { o, n -> BytesListView(msg, o, n) }
+    val edges: StructEvoListView<NodeReader> get() = msg.viewAt(origin + 76) { o, n -> StructEvoListView(msg, o, (n).toLong(), 12) { m, p, e, h -> NodeReader(m, p, e, h) } }
+    val points: StructEvoListView<PointReader> get() = msg.viewAt(origin + 84) { o, n -> StructEvoListView(msg, o, (n).toLong(), 8) { m, p, e, h -> PointReader(m, p, e, h) } }
+    val counts: CountsMapView get() = msg.viewAt(origin + 92) { o, n -> CountsMapView(msg, o, n) }
+    val byId: ByIdMapView get() = msg.viewAt(origin + 100) { o, n -> ByIdMapView(msg, o, n) }
     val avatar: ByteArray?
-        get() = if (msg.bitmapBit(origin, 0)) msg.readBytes(origin + 116) else null
+        get() = if (msg.bitmapBit(origin, 0)) msg.readBytes(origin + 108) else null
     val motto: String?
-        get() = if (msg.bitmapBit(origin, 1)) msg.readString(origin + 124) else null
-    val stamp: Long get() = msg.readI64(origin + 136)
-    val ratio: Double get() = msg.readF64(origin + 144)
-    val flag: Boolean get() = msg.readBool(origin + 152)
-    val small: UByte get() = msg.readU8(origin + 153)
-    val wide: UShort get() = msg.readU16(origin + 154)
-    val offset: Short get() = msg.readI16(origin + 156)
-    val preciseId: ULong get() = msg.readU64(origin + 160)
+        get() = if (msg.bitmapBit(origin, 1)) msg.readString(origin + 116) else null
+    val stamp: Long get() = msg.readI64(origin + 128)
+    val ratio: Double get() = msg.readF64(origin + 136)
+    val flag: Boolean get() = msg.readBool(origin + 144)
+    val small: UByte get() = msg.readU8(origin + 145)
+    val wide: UShort get() = msg.readU16(origin + 146)
+    val offset: Short get() = msg.readI16(origin + 148)
+    val preciseId: ULong get() = msg.readU64(origin + 152)
     val email: String?
         get() {
-            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 24) ?: return null
+            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 24, origin, end) ?: return null
             return if (msg.bitmapBit(bs, 0)) msg.readString(bs + 4) else null
         }
     val score: Double
         get() {
-            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 24) ?: return 0.0
+            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 2, 24, origin, end) ?: return 0.0
             return msg.readF64(bs + 16)
         }
     val tags2: StringListView
         get() {
-            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 3, 16) ?: return StringListView(msg, 0, 0)
+            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 3, 16, origin, end) ?: return StringListView(msg, 0, 0)
             return msg.viewAt(bs + 4) { o, n -> StringListView(msg, o, n) }
         }
     val vip: Boolean?
         get() {
-            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 3, 16) ?: return null
+            val bs = msg.findExtBlock(EXT_VERSIONS, hv, 3, 16, origin, end) ?: return null
             return if (msg.bitmapBit(bs, 0)) msg.readBool(bs + 12) else null
         }
 
@@ -451,6 +598,7 @@ class UserReader(override val msg: RawMessage, override val origin: Int, overrid
         tags = tags.toList(),
         blobs = blobs.toList(),
         edges = edges.map { it.toOwned() },
+        points = points.map { it.toOwned() },
         counts = counts.associate { it.key to it.value },
         byId = byId.associate { it.key to it.value.toOwned() },
         avatar = avatar,
@@ -470,49 +618,51 @@ class UserReader(override val msg: RawMessage, override val origin: Int, overrid
 
     companion object {
         val KEY: UInt = 1u
-        const val FIXED_LEN = 168
+        const val FIXED_LEN = 160
         val EXT_VERSIONS = intArrayOf(2, 3)
 
         /// Lazy decode: null only when the buffer is too short or the key does not match.
         fun decode(bytes: ByteArray): UserReader? {
             val m = RawMessage.decode(bytes, KEY, FIXED_LEN) ?: return null
-            return UserReader(m, 0, m.version)
+            return UserReader(m, 0, m.payloadSize, m.version)
         }
     }
 }
 
-class CountsMapView(val msg: RawMessage, val start: Int, override val size: Int) : AbstractList<Map.Entry<String, UInt>>() {
+class CountsMapView(val msg: RawMessage, val start: Int, private val rawLen: Int) : AbstractList<Map.Entry<String, UInt>>() {
+    override val size: Int get() = rawLen and LEN_MASK
+    private val inst: Boolean get() = (rawLen and SHAPE_BIT) != 0
+    private val stride: Int get() = 12
+    private val vOff: Int get() = 8
     override fun get(index: Int): Map.Entry<String, UInt> = entry(index)
     fun key(i: Int): String {
         checkIndex(i, size)
-        return msg.readString(start + i * STRIDE)
+        return msg.readString(start + i * stride)
     }
     fun value(i: Int): UInt {
         checkIndex(i, size)
-        return msg.readU32(start + i * STRIDE + V_OFF)
+        return msg.readU32(start + i * stride + vOff)
     }
     fun entry(i: Int): Map.Entry<String, UInt> = MapEntry(key(i), value(i))
-    companion object {
-        private const val STRIDE = 12
-        private const val V_OFF = 8
-    }
 }
 
-class ByIdMapView(val msg: RawMessage, val start: Int, override val size: Int) : AbstractList<Map.Entry<ULong, ProfileReader>>() {
+class ByIdMapView(val msg: RawMessage, val start: Int, private val rawLen: Int) : AbstractList<Map.Entry<ULong, ProfileReader>>() {
+    override val size: Int get() = rawLen and LEN_MASK
+    private val inst: Boolean get() = (rawLen and SHAPE_BIT) != 0
+    private val stride: Int get() = if (inst) 16 else 32
+    private val vOff: Int get() = if (inst) 8 else 8
     override fun get(index: Int): Map.Entry<ULong, ProfileReader> = entry(index)
     fun key(i: Int): ULong {
         checkIndex(i, size)
-        return msg.readU64(start + i * STRIDE)
+        return msg.readU64(start + i * stride)
     }
     fun value(i: Int): ProfileReader {
         checkIndex(i, size)
-        return ProfileReader(msg, start + i * STRIDE + V_OFF, 0)
+        val p = start + i * stride + vOff
+        if (inst) return msg.readSlot(p).let { s -> ProfileReader(msg, s.offset.toInt(), (s.offset + s.length).toInt(), INSTANCE_HV) }
+        return ProfileReader(msg, p, msg.payloadSize, 0)
     }
     fun entry(i: Int): Map.Entry<ULong, ProfileReader> = MapEntry(key(i), value(i))
-    companion object {
-        private const val STRIDE = 32
-        private const val V_OFF = 8
-    }
 }
 
 data class User(
@@ -525,6 +675,7 @@ data class User(
     val tags: List<String>,
     val blobs: List<ByteArray>,
     val edges: List<Node>,
+    val points: List<Point>,
     val counts: Map<String, UInt>,
     val byId: Map<ULong, Profile>,
     val avatar: ByteArray?,
@@ -552,6 +703,7 @@ data class User(
             tags == other.tags &&
             contentEquals(blobs, other.blobs) &&
             edges == other.edges &&
+            points == other.points &&
             counts == other.counts &&
             byId == other.byId &&
             contentEquals(avatar, other.avatar) &&
@@ -578,6 +730,7 @@ data class User(
         h = 31 * h + tags.hashCode()
         h = 31 * h + contentHashCode(blobs)
         h = 31 * h + edges.hashCode()
+        h = 31 * h + points.hashCode()
         h = 31 * h + counts.hashCode()
         h = 31 * h + byId.hashCode()
         h = 31 * h + contentHashCode(avatar)
@@ -598,37 +751,13 @@ data class User(
 
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
     fun encode(): ByteArray {
-        val w = Writer(176)
+        val w = Writer(168)
         w.reserve(8)
-        val base = w.reserve(168)
+        val base = w.reserve(160)
         __writeUserBase(w, base, this)
-        run {
-            val blk = w.reserve(24)
-            email?.let { v ->
-                w.setBit(blk, 0)
-                w.writeStringSlot(blk + 4, v)
-            }
-            w.writeF64(blk + 16, score)
-            w.writeTrailer(blk, 2)
-        }
-        run {
-            val blk = w.reserve(16)
-            run {
-                val a0 = tags2
-                val r0 = w.reserve(a0.size * 8)
-                for (i0 in a0.indices) {
-                    w.writeStringSlot(r0 + i0 * 8, a0[i0])
-                }
-                w.writeSlot(blk + 4, w.rel(r0), a0.size)
-            }
-            vip?.let { v ->
-                w.setBit(blk, 0)
-                w.writeBool(blk + 12, v)
-            }
-            w.writeTrailer(blk, 3)
-        }
+        __writeUserExt(w, this)
         w.writeU32(0, UserReader.KEY)
-        w.writeU16(4, 168u)
+        w.writeU16(4, 160u)
         w.writeU8(6, 3u)
         w.writeU8(7, 0u)
         return w.finish()
@@ -655,9 +784,9 @@ private fun __writeUserBase(w: Writer, base: Int, value: User) {
     w.writeU64(base + 8, value.id)
     w.writeStringSlot(base + 16, value.name)
     w.writeI32(base + 24, value.color.value)
-    __writeProfileBase(w, base + 28, value.profile)
+    run { val s = __writeProfileInstance(w, value.profile); w.writeSlot(base + 28, w.rel(s), w.length - s) }
     for (i0 in 0 until minOf(4, value.matrix.size)) {
-        w.writeF32(base + 52 + i0 * 4, value.matrix[i0])
+        w.writeF32(base + 36 + i0 * 4, value.matrix[i0])
     }
     run {
         val a0 = value.nums
@@ -665,7 +794,7 @@ private fun __writeUserBase(w: Writer, base: Int, value: User) {
         for (i0 in a0.indices) {
             w.writeI32(r0 + i0 * 4, a0[i0])
         }
-        w.writeSlot(base + 68, w.rel(r0), a0.size)
+        w.writeSlot(base + 52, w.rel(r0), a0.size)
     }
     run {
         val a0 = value.tags
@@ -673,7 +802,7 @@ private fun __writeUserBase(w: Writer, base: Int, value: User) {
         for (i0 in a0.indices) {
             w.writeStringSlot(r0 + i0 * 8, a0[i0])
         }
-        w.writeSlot(base + 76, w.rel(r0), a0.size)
+        w.writeSlot(base + 60, w.rel(r0), a0.size)
     }
     run {
         val a0 = value.blobs
@@ -681,7 +810,7 @@ private fun __writeUserBase(w: Writer, base: Int, value: User) {
         for (i0 in a0.indices) {
             w.writeBytesSlot(r0 + i0 * 8, a0[i0])
         }
-        w.writeSlot(base + 84, w.rel(r0), a0.size)
+        w.writeSlot(base + 68, w.rel(r0), a0.size)
     }
     run {
         val a0 = value.edges
@@ -689,7 +818,15 @@ private fun __writeUserBase(w: Writer, base: Int, value: User) {
         for (i0 in a0.indices) {
             __writeNodeBase(w, r0 + i0 * 12, a0[i0])
         }
-        w.writeSlot(base + 92, w.rel(r0), a0.size)
+        w.writeSlot(base + 76, w.rel(r0), a0.size)
+    }
+    run {
+        val a0 = value.points
+        val r0 = w.reserve(a0.size * 8)
+        for (i0 in a0.indices) {
+            __writePointBase(w, r0 + i0 * 8, a0[i0])
+        }
+        w.writeSlot(base + 84, w.rel(r0), a0.size)
     }
     run {
         val o = value.counts
@@ -700,78 +837,137 @@ private fun __writeUserBase(w: Writer, base: Int, value: User) {
             w.writeStringSlot(e, ks[i])
             w.writeU32(e + 8, o.getValue(ks[i]))
         }
-        w.writeSlot(base + 100, w.rel(r), ks.size)
+        w.writeSlot(base + 92, w.rel(r), ks.size)
     }
     run {
         val o = value.byId
         val ks = o.keys.sorted()
-        val r = w.reserve(ks.size * 32)
+        val r = w.reserve(ks.size * 16)
         for (i in ks.indices) {
-            val e = r + i * 32
+            val e = r + i * 16
             w.writeU64(e, ks[i])
-            __writeProfileBase(w, e + 8, o.getValue(ks[i]))
+            run { val s = __writeProfileInstance(w, o.getValue(ks[i])); w.writeSlot(e + 8, w.rel(s), w.length - s) }
         }
-        w.writeSlot(base + 108, w.rel(r), ks.size)
+        w.writeSlot(base + 100, w.rel(r), ks.size or SHAPE_BIT)
     }
     value.avatar?.let { v ->
         w.setBit(base, 0)
-        w.writeBytesSlot(base + 116, v)
+        w.writeBytesSlot(base + 108, v)
     }
     value.motto?.let { v ->
         w.setBit(base, 1)
-        w.writeStringSlot(base + 124, v)
+        w.writeStringSlot(base + 116, v)
     }
-    w.writeI64(base + 136, value.stamp)
-    w.writeF64(base + 144, value.ratio)
-    w.writeBool(base + 152, value.flag)
-    w.writeU8(base + 153, value.small)
-    w.writeU16(base + 154, value.wide)
-    w.writeI16(base + 156, value.offset)
-    w.writeU64(base + 160, value.preciseId)
+    w.writeI64(base + 128, value.stamp)
+    w.writeF64(base + 136, value.ratio)
+    w.writeBool(base + 144, value.flag)
+    w.writeU8(base + 145, value.small)
+    w.writeU16(base + 146, value.wide)
+    w.writeI16(base + 148, value.offset)
+    w.writeU64(base + 152, value.preciseId)
+}
+
+private fun __writeUserExt(w: Writer, value: User) {
+    run {
+        val blk = w.reserve(24)
+        value.email?.let { v ->
+            w.setBit(blk, 0)
+            w.writeStringSlot(blk + 4, v)
+        }
+        w.writeF64(blk + 16, value.score)
+        w.writeTrailer(blk, 2)
+    }
+    run {
+        val blk = w.reserve(16)
+        run {
+            val a0 = value.tags2
+            val r0 = w.reserve(a0.size * 8)
+            for (i0 in a0.indices) {
+                w.writeStringSlot(r0 + i0 * 8, a0[i0])
+            }
+            w.writeSlot(blk + 4, w.rel(r0), a0.size)
+        }
+        value.vip?.let { v ->
+            w.setBit(blk, 0)
+            w.writeBool(blk + 12, v)
+        }
+        w.writeTrailer(blk, 3)
+    }
+}
+
+private fun __writeUserInstance(w: Writer, value: User): Int {
+    val s = w.reserve(160)
+    __writeUserBase(w, s, value)
+    __writeUserExt(w, value)
+    return s
 }
 
 private fun __validateUserBase(m: RawMessage, base: Int, hv: Int) {
     nest("name") { checkStrSlot(m, base + 16) }
     nest("color") { checkEnum(Color, m, base + 24) }
-    nest("profile") { __validateProfileBase(m, base + 28, hv) }
-    checkRegion(m, base + 68, 4, "nums")
+    nest("profile") { checkInstance(m, base + 28).let { __validateProfileInst(m, it.lo, it.hi) } }
+    checkRegion(m, base + 52, 4, "nums")
     run {
-        val (o0, n0) = checkRegion(m, base + 76, 8, "tags")
+        val (o0, n0) = checkRegion(m, base + 60, 8, "tags")
         for (i0 in 0 until n0) {
             nest("tags", i0) { checkStrSlot(m, o0 + i0 * 8) }
         }
     }
     run {
-        val (o0, n0) = checkRegion(m, base + 84, 8, "blobs")
+        val (o0, n0) = checkRegion(m, base + 68, 8, "blobs")
         for (i0 in 0 until n0) {
             nest("blobs", i0) { checkBytesSlot(m, o0 + i0 * 8) }
         }
     }
     run {
-        val (o0, n0) = checkRegion(m, base + 92, 12, "edges")
-        for (i0 in 0 until n0) {
-            nest("edges", i0) { __validateNodeBase(m, o0 + i0 * 12, hv) }
+        val r0 = checkRegionShape(m, base + 76, "edges")
+        if (r0.instances) {
+            for (i0 in 0 until r0.count) {
+                nest("edges", i0) { checkInstance(m, r0.offset + i0 * 8).let { __validateNodeInst(m, it.lo, it.hi) } }
+            }
+        } else {
+            checkExtent(m, r0.offset, r0.count, 12, "edges")
+            for (i0 in 0 until r0.count) {
+                nest("edges", i0) { __validateNodeBase(m, r0.offset + i0 * 12, 0) }
+            }
         }
     }
     run {
-        val (o0, n0) = checkRegion(m, base + 100, 12, "counts")
+        val r0 = checkRegionShape(m, base + 84, "points")
+        if (r0.instances) {
+            for (i0 in 0 until r0.count) {
+                nest("points", i0) { checkInstance(m, r0.offset + i0 * 8).let { __validatePointInst(m, it.lo, it.hi) } }
+            }
+        } else {
+            checkExtent(m, r0.offset, r0.count, 8, "points")
+            for (i0 in 0 until r0.count) {
+                nest("points", i0) { __validatePointBase(m, r0.offset + i0 * 8, 0) }
+            }
+        }
+    }
+    run {
+        val (o0, n0) = checkRegion(m, base + 92, 12, "counts")
         for (i0 in 0 until n0) {
             val e = o0 + i0 * 12
             nest("counts", i0) { checkStrSlot(m, e) }
         }
     }
     run {
-        val (o0, n0) = checkRegion(m, base + 108, 32, "byId")
-        for (i0 in 0 until n0) {
-            val e = o0 + i0 * 32
-            nest("byId", i0) { __validateProfileBase(m, e + 8, hv) }
+        val r0 = checkRegionShape(m, base + 100, "byId")
+        val st = if (r0.instances) 16 else 32
+        val vo = if (r0.instances) 8 else 8
+        checkExtent(m, r0.offset, r0.count, st, "byId")
+        for (i0 in 0 until r0.count) {
+            val e = r0.offset + i0 * st
+            if (r0.instances) nest("byId", i0) { checkInstance(m, e + vo).let { __validateProfileInst(m, it.lo, it.hi) } }
+            else nest("byId", i0) { __validateProfileBase(m, e + vo, 0) }
         }
     }
     if (m.bitmapBit(base, 0)) {
-        nest("avatar") { checkBytesSlot(m, base + 116) }
+        nest("avatar") { checkBytesSlot(m, base + 108) }
     }
     if (m.bitmapBit(base, 1)) {
-        nest("motto") { checkStrSlot(m, base + 124) }
+        nest("motto") { checkStrSlot(m, base + 116) }
     }
 }
 
@@ -788,5 +984,11 @@ private fun __validateUserV3(m: RawMessage, base: Int, hv: Int) {
             nest("tags2", i0) { checkStrSlot(m, o0 + i0 * 8) }
         }
     }
+}
+
+private fun __validateUserInst(m: RawMessage, lo: Int, hi: Int) {
+    __validateUserBase(m, lo, INSTANCE_HV)
+    m.findExtBlock(UserReader.EXT_VERSIONS, INSTANCE_HV, 3, 16, lo, hi)?.let { __validateUserV3(m, it, INSTANCE_HV) }
+    m.findExtBlock(UserReader.EXT_VERSIONS, INSTANCE_HV, 2, 24, lo, hi)?.let { __validateUserV2(m, it, INSTANCE_HV) }
 }
 

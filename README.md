@@ -52,7 +52,7 @@ let tags = r.tags();                       // lazy view
 let user2 = r.to_owned();                  // plain struct
 ```
 
-Supported field types: scalars, `String`, `Vec<u8>`, enums, inline structs, fixed and dynamic
+Supported field types: scalars, `String`, `Vec<u8>`, enums, nested structs, fixed and dynamic
 arrays (nested), `HashMap`/`BTreeMap` with scalar / `String` / enum keys, `Option<T>` of any of
 these. V1 limits are listed in the spec.
 
@@ -74,9 +74,24 @@ In your own crate, add `src/bin/export-schema.rs` containing `message_gen::expor
 
 The base layout is frozen forever. To add a field, give it `#[msg(since = N)]` with `N` greater
 than the current maximum; it goes into a new extension block and older readers ignore it while
-newer readers read old buffers with defaults. To remove a field from the API, mark it
-`#[msg(reserved)]` instead of deleting it. `check` enforces all of this against the committed
-snapshot; see [SPEC.md §7](SPEC.md#7-evolution-rules-append-only).
+newer readers read old buffers with defaults. This works the same for nested structs: a struct
+referenced by another type is stored as a self-contained instance with its own extension chain,
+so it can gain fields at any time without touching its containers.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Message)]
+#[msg(key = 0x0002)]
+pub struct Profile {
+    pub age: u32,
+    pub bio: String,
+    #[msg(since = 2)]
+    pub verified: Option<bool>,             // added later; User.profile and Vec<Profile> keep working
+}
+```
+
+To remove a field from the API, mark it `#[msg(reserved)]` instead of deleting it. `check`
+enforces all of this against the committed snapshot; see
+[SPEC.md §7](SPEC.md#7-evolution-rules-append-only).
 
 ## TypeScript
 

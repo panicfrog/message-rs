@@ -4,9 +4,10 @@
 import {
   readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,
   readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,
-  findExtBlock, ScalarListView, StringListView, BytesListView, SlotListView,
-  StructListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion, vEnum,
-  ValidationError, type ValidationPath,
+  findExtBlock, findExtBlockIn, ScalarListView, StringListView, BytesListView, SlotListView,
+  StructListView, StructEvoListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion,
+  vRegionShape, vExtent, vInstance, vEnum, ValidationError, type ValidationPath,
+  INSTANCE_HV, SHAPE_BIT, LEN_MASK,
 } from './runtime.js';
 
 export enum Color {
@@ -21,14 +22,17 @@ export class LegacyReader {
   static readonly EXT_VERSIONS: readonly number[] = [];
   static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
-  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and
+   *  open elements, the instance for self-contained structs); `hv` is the writer's header version
+   *  (INSTANCE_HV inside instances). */
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
 
   static decode(buf: Uint8Array): LegacyReader | null {
     if (buf.length < 8 + 24) return null;
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== LegacyReader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-    return new LegacyReader(payload, 0, full.getUint8(6));
+    return new LegacyReader(payload, 0, payload.byteLength, full.getUint8(6));
   }
 
   get id(): number {
@@ -51,8 +55,18 @@ function __writeLegacyBase(w: Writer, base: number, value: Legacy): void {
   { const b = utf8Encode(value.note); w.slot(base + 16, w.append(b), b.length); }
 }
 
+function __writeLegacyInstance(w: Writer, value: Legacy): number {
+  const s = w.reserve(24);
+  __writeLegacyBase(w, s, value);
+  return s;
+}
+
 function __validateLegacyBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {
   vStr(dv, base + 16, path, 'note');
+}
+function __validateLegacyInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
+  __validateLegacyBase(dv, lo, INSTANCE_HV, path);
+  void hi;
 }
 
 export interface Legacy {
@@ -112,21 +126,24 @@ export class NodeReader {
   static readonly EXT_VERSIONS: readonly number[] = [];
   static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
-  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and
+   *  open elements, the instance for self-contained structs); `hv` is the writer's header version
+   *  (INSTANCE_HV inside instances). */
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
 
   static decode(buf: Uint8Array): NodeReader | null {
     if (buf.length < 8 + 12) return null;
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== NodeReader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-    return new NodeReader(payload, 0, full.getUint8(6));
+    return new NodeReader(payload, 0, payload.byteLength, full.getUint8(6));
   }
 
   get value(): number {
     return readU32(this.dv, this.origin + 0);
   }
-  get children(): StructListView<NodeReader> {
-    { const [o, l] = readSlot(this.dv, this.origin + 4); return new StructListView<NodeReader>(this.dv, o, l, 12, (dv, off, hv) => new NodeReader(dv, off, hv)); }
+  get children(): StructEvoListView<NodeReader> {
+    { const [o, l] = readSlot(this.dv, this.origin + 4); return new StructEvoListView<NodeReader>(this.dv, o, l, 12, (dv, o, e, hv) => new NodeReader(dv, o, e, hv)); }
   }
 
   toUser(): Node {
@@ -149,13 +166,28 @@ function __writeNodeBase(w: Writer, base: number, value: Node): void {
   }
 }
 
+function __writeNodeInstance(w: Writer, value: Node): number {
+  const s = w.reserve(12);
+  __writeNodeBase(w, s, value);
+  return s;
+}
+
 function __validateNodeBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {
   {
-    const [o0, n0] = vRegion(dv, base + 4, 12, path, 'children');
-    for (let i0 = 0; i0 < n0; i0++) {
-      __validateNodeBase(dv, o0 + i0 * 12, hv, [...path, 'children', i0]);
+    const [o0, n0, s0] = vRegionShape(dv, base + 4, path, 'children');
+    if (s0) {
+      for (let i0 = 0; i0 < n0; i0++) {
+        const [lo, hi] = vInstance(dv, o0 + i0 * 8, path, 'children', i0); __validateNodeInst(dv, lo, hi, [...path, 'children', i0]);
+      }
+    } else {
+      vExtent(dv, o0, n0, 12, path, 'children');
+      for (let i0 = 0; i0 < n0; i0++) __validateNodeBase(dv, o0 + i0 * 12, 0, [...path, 'children', i0]);
     }
   }
+}
+function __validateNodeInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
+  __validateNodeBase(dv, lo, INSTANCE_HV, path);
+  void hi;
 }
 
 export interface Node {
@@ -209,20 +241,126 @@ export namespace Node {
 
 }
 
-export class ProfileReader {
-  static readonly KEY = 2;
-  static readonly FIXED_LEN = 24;
+export class PointReader {
+  static readonly KEY = 6;
+  static readonly FIXED_LEN = 8;
   static readonly EXT_VERSIONS: readonly number[] = [];
   static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
-  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and
+   *  open elements, the instance for self-contained structs); `hv` is the writer's header version
+   *  (INSTANCE_HV inside instances). */
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
+
+  static decode(buf: Uint8Array): PointReader | null {
+    if (buf.length < 8 + 8) return null;
+    const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (full.getUint32(0, true) !== PointReader.KEY) return null;
+    const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
+    return new PointReader(payload, 0, payload.byteLength, full.getUint8(6));
+  }
+
+  get x(): number {
+    return readF32(this.dv, this.origin + 0);
+  }
+  get y(): number {
+    return readF32(this.dv, this.origin + 4);
+  }
+
+  toUser(): Point {
+    return {
+      x: this.x,
+      y: this.y,
+    };
+  }
+}
+
+function __writePointBase(w: Writer, base: number, value: Point): void {
+  w.f32(base + 0, value.x);
+  w.f32(base + 4, value.y);
+}
+
+function __writePointInstance(w: Writer, value: Point): number {
+  const s = w.reserve(8);
+  __writePointBase(w, s, value);
+  return s;
+}
+
+function __validatePointBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {
+}
+function __validatePointInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
+  __validatePointBase(dv, lo, INSTANCE_HV, path);
+  void hi;
+}
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export namespace Point {
+  export function decode(buf: Uint8Array): PointReader | null {
+    return PointReader.decode(buf);
+  }
+  export function fromReader(r: PointReader): Point {
+    return r.toUser();
+  }
+  export function fromBytes(buf: Uint8Array): Point | null {
+    const r = PointReader.decode(buf);
+    return r === null ? null : r.toUser();
+  }
+    /** Strictly check an untrusted buffer; after null no getter can throw. */
+    export function validate(buf: Uint8Array): ValidationError | null {
+      try {
+        if (buf.length < 16) throw new ValidationError(`buffer too short: need 16 bytes, got ${buf.length}`);
+        const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        const key = full.getUint32(0, true);
+        if (key !== 6) throw new ValidationError(`key mismatch: expected 6, got ${key}`);
+        const fl = full.getUint16(4, true);
+        if (fl !== 8) throw new ValidationError(`header fixed_len mismatch: expected 8, got ${fl}`);
+        const hv = full.getUint8(6);
+        const dv = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
+        const path: ValidationPath = [];
+        __validatePointBase(dv, 0, hv, path);
+        return null;
+      } catch (e) {
+        if (e instanceof ValidationError) return e;
+        throw e;
+      }
+    }
+
+    /** Canonical encoding (byte-identical to Rust): declaration-order var data, sorted map keys. */
+    export function encode(value: Point): Uint8Array {
+      const w = new Writer(16);
+      w.reserve(8);
+      const base = w.reserve(8);
+      __writePointBase(w, base, value);
+      w.u32(0, 6);
+      w.u16(4, 8);
+      w.u8(6, 0);
+      w.u8(7, 0);
+      return w.finish();
+    }
+
+}
+
+export class ProfileReader {
+  static readonly KEY = 2;
+  static readonly FIXED_LEN = 24;
+  static readonly EXT_VERSIONS: readonly number[] = [2];
+  static readonly EXT_FIXED: Readonly<Record<number, number>> = { 2: 8 };
+
+  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and
+   *  open elements, the instance for self-contained structs); `hv` is the writer's header version
+   *  (INSTANCE_HV inside instances). */
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
 
   static decode(buf: Uint8Array): ProfileReader | null {
     if (buf.length < 8 + 24) return null;
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== ProfileReader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-    return new ProfileReader(payload, 0, full.getUint8(6));
+    return new ProfileReader(payload, 0, payload.byteLength, full.getUint8(6));
   }
 
   get age(): number {
@@ -235,12 +373,21 @@ export class ProfileReader {
     if (!readBitmapBit(this.dv, this.origin, 0)) return null;
     { const [o, l] = readSlot(this.dv, this.origin + 16); return utf8(this.dv, o, l); }
   }
+  get verified(): boolean | null {
+    const bs = findExtBlockIn(this.dv, ProfileReader.EXT_VERSIONS, this.hv, 2, ProfileReader.EXT_FIXED[2], this.origin, this.end);
+    if (bs === null || !readBitmapBit(this.dv, bs, 0)) return null;
+    {
+      const __origin = bs;
+      return readBool(this.dv, __origin + 4);
+    }
+  }
 
   toUser(): Profile {
     return {
       age: this.age,
       bio: this.bio,
       nickname: this.nickname === null ? null : this.nickname,
+      verified: this.verified === null ? null : this.verified,
     };
   }
 }
@@ -257,10 +404,42 @@ function __writeProfileBase(w: Writer, base: number, value: Profile): void {
   }
 }
 
+function __writeProfileExt(w: Writer, value: Profile): void {
+  {
+    const blk = w.reserve(8);
+    {
+      const v = value.verified;
+      if (v !== null && v !== undefined) {
+        w.bit(blk, 0);
+        w.bool(blk + 4, v);
+      }
+    }
+    w.trailer(blk, 2);
+  }
+}
+
+function __writeProfileInstance(w: Writer, value: Profile): number {
+  const s = w.reserve(24);
+  __writeProfileBase(w, s, value);
+  __writeProfileExt(w, value);
+  return s;
+}
+
 function __validateProfileBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {
   vStr(dv, base + 8, path, 'bio');
   if (readBitmapBit(dv, base, 0)) {
     vStr(dv, base + 16, path, 'nickname');
+  }
+}
+function __validateProfileV2(dv: DataView, base: number, hv: number, path: ValidationPath): void {
+  if (readBitmapBit(dv, base, 0)) {
+  }
+}
+function __validateProfileInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
+  __validateProfileBase(dv, lo, INSTANCE_HV, path);
+  {
+    const bs = findExtBlockIn(dv, ProfileReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo, hi);
+    if (bs !== null) __validateProfileV2(dv, bs, INSTANCE_HV, path);
   }
 }
 
@@ -268,6 +447,7 @@ export interface Profile {
   age: number;
   bio: string;
   nickname: string | null;
+  verified: boolean | null;
 }
 
 export namespace Profile {
@@ -294,6 +474,11 @@ export namespace Profile {
         const dv = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
         const path: ValidationPath = [];
         __validateProfileBase(dv, 0, hv, path);
+        if (hv >= 2) {
+        const bs = findExtBlock(dv, ProfileReader.EXT_VERSIONS, hv, 2, 8);
+        if (bs === null) throw new ValidationError('extension block v2 missing or malformed');
+        __validateProfileV2(dv, bs, hv, path);
+        }
         return null;
       } catch (e) {
         if (e instanceof ValidationError) return e;
@@ -307,9 +492,10 @@ export namespace Profile {
       w.reserve(8);
       const base = w.reserve(24);
       __writeProfileBase(w, base, value);
+      __writeProfileExt(w, value);
       w.u32(0, 2);
       w.u16(4, 24);
-      w.u8(6, 0);
+      w.u8(6, 2);
       w.u8(7, 0);
       return w.finish();
     }
@@ -322,14 +508,17 @@ export class TallyReader {
   static readonly EXT_VERSIONS: readonly number[] = [];
   static readonly EXT_FIXED: Readonly<Record<number, number>> = {  };
 
-  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and
+   *  open elements, the instance for self-contained structs); `hv` is the writer's header version
+   *  (INSTANCE_HV inside instances). */
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
 
   static decode(buf: Uint8Array): TallyReader | null {
     if (buf.length < 8 + 32) return null;
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== TallyReader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-    return new TallyReader(payload, 0, full.getUint8(6));
+    return new TallyReader(payload, 0, payload.byteLength, full.getUint8(6));
   }
 
   get usage(): UsageMapView {
@@ -413,6 +602,12 @@ function __writeTallyBase(w: Writer, base: number, value: Tally): void {
   }
 }
 
+function __writeTallyInstance(w: Writer, value: Tally): number {
+  const s = w.reserve(32);
+  __writeTallyBase(w, s, value);
+  return s;
+}
+
 function __validateTallyBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {
   {
     const [o0, n0] = vRegion(dv, base + 0, 8, path, 'usage');
@@ -451,6 +646,10 @@ function __validateTallyBase(dv: DataView, base: number, hv: number, path: Valid
       }
     }
   }
+}
+function __validateTallyInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
+  __validateTallyBase(dv, lo, INSTANCE_HV, path);
+  void hi;
 }
 
 export interface Tally {
@@ -507,8 +706,9 @@ export namespace Tally {
 }
 
 export class UsageMapView {
-  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {}
-  get length(): number { return this.count; }
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly rawLen: number) {}
+  get length(): number { return this.rawLen & LEN_MASK; }
+  private get inst(): boolean { return this.rawLen >= SHAPE_BIT; }
   key(i: number): Color {
     const e = this.start + i * 8;
     return readI32(this.dv, e) as Color;
@@ -522,8 +722,9 @@ export class UsageMapView {
 
 
 export class LabelsMapView {
-  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {}
-  get length(): number { return this.count; }
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly rawLen: number) {}
+  get length(): number { return this.rawLen & LEN_MASK; }
+  private get inst(): boolean { return this.rawLen >= SHAPE_BIT; }
   key(i: number): string {
     const e = this.start + i * 16;
     const [o, l] = readSlot(this.dv, e); return utf8(this.dv, o, l);
@@ -538,18 +739,21 @@ export class LabelsMapView {
 
 export class UserReader {
   static readonly KEY = 1;
-  static readonly FIXED_LEN = 168;
+  static readonly FIXED_LEN = 160;
   static readonly EXT_VERSIONS: readonly number[] = [2, 3];
   static readonly EXT_FIXED: Readonly<Record<number, number>> = { 2: 24, 3: 16 };
 
-  constructor(private readonly dv: DataView, private readonly origin: number, private readonly hv: number) {}
+  /** `[origin, end)` is the extent this view may read (the payload for top-level messages and
+   *  open elements, the instance for self-contained structs); `hv` is the writer's header version
+   *  (INSTANCE_HV inside instances). */
+  constructor(private readonly dv: DataView, private readonly origin: number, private readonly end: number, private readonly hv: number) {}
 
   static decode(buf: Uint8Array): UserReader | null {
-    if (buf.length < 8 + 168) return null;
+    if (buf.length < 8 + 160) return null;
     const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     if (full.getUint32(0, true) !== UserReader.KEY) return null;
     const payload = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-    return new UserReader(payload, 0, full.getUint8(6));
+    return new UserReader(payload, 0, payload.byteLength, full.getUint8(6));
   }
 
   get id(): number {
@@ -562,68 +766,71 @@ export class UserReader {
     return readI32(this.dv, this.origin + 24) as Color;
   }
   get profile(): ProfileReader {
-    return new ProfileReader(this.dv, this.origin + 28, this.hv);
+    { const [o, l] = readSlot(this.dv, this.origin + 28); return new ProfileReader(this.dv, o, o + l, INSTANCE_HV); }
   }
   get matrix(): ScalarListView<number> {
-    { return new ScalarListView<number>(this.dv, this.origin + 52, 4, 4, readF32); }
+    { return new ScalarListView<number>(this.dv, this.origin + 36, 4, 4, readF32); }
   }
   get nums(): ScalarListView<number> {
-    { const [o, l] = readSlot(this.dv, this.origin + 68); return new ScalarListView<number>(this.dv, o, l, 4, readI32); }
+    { const [o, l] = readSlot(this.dv, this.origin + 52); return new ScalarListView<number>(this.dv, o, l, 4, readI32); }
   }
   get tags(): StringListView {
-    { const [o, l] = readSlot(this.dv, this.origin + 76); return new StringListView(this.dv, o, l); }
+    { const [o, l] = readSlot(this.dv, this.origin + 60); return new StringListView(this.dv, o, l); }
   }
   get blobs(): BytesListView {
-    { const [o, l] = readSlot(this.dv, this.origin + 84); return new BytesListView(this.dv, o, l); }
+    { const [o, l] = readSlot(this.dv, this.origin + 68); return new BytesListView(this.dv, o, l); }
   }
-  get edges(): StructListView<NodeReader> {
-    { const [o, l] = readSlot(this.dv, this.origin + 92); return new StructListView<NodeReader>(this.dv, o, l, 12, (dv, off, hv) => new NodeReader(dv, off, hv)); }
+  get edges(): StructEvoListView<NodeReader> {
+    { const [o, l] = readSlot(this.dv, this.origin + 76); return new StructEvoListView<NodeReader>(this.dv, o, l, 12, (dv, o, e, hv) => new NodeReader(dv, o, e, hv)); }
+  }
+  get points(): StructEvoListView<PointReader> {
+    { const [o, l] = readSlot(this.dv, this.origin + 84); return new StructEvoListView<PointReader>(this.dv, o, l, 8, (dv, o, e, hv) => new PointReader(dv, o, e, hv)); }
   }
   get counts(): CountsMapView {
-    { const [o, l] = readSlot(this.dv, this.origin + 100); return new CountsMapView(this.dv, o, l); }
+    { const [o, l] = readSlot(this.dv, this.origin + 92); return new CountsMapView(this.dv, o, l); }
   }
   get byId(): ByIdMapView {
-    { const [o, l] = readSlot(this.dv, this.origin + 108); return new ByIdMapView(this.dv, o, l); }
+    { const [o, l] = readSlot(this.dv, this.origin + 100); return new ByIdMapView(this.dv, o, l); }
   }
   get avatar(): Uint8Array | null {
     if (!readBitmapBit(this.dv, this.origin, 0)) return null;
-    { const [o, l] = readSlot(this.dv, this.origin + 116); return slotBytes(this.dv, o, l); }
+    { const [o, l] = readSlot(this.dv, this.origin + 108); return slotBytes(this.dv, o, l); }
   }
   get motto(): string | null {
     if (!readBitmapBit(this.dv, this.origin, 1)) return null;
-    { const [o, l] = readSlot(this.dv, this.origin + 124); return utf8(this.dv, o, l); }
+    { const [o, l] = readSlot(this.dv, this.origin + 116); return utf8(this.dv, o, l); }
   }
   get stamp(): number {
-    return readI64(this.dv, this.origin + 136);
+    return readI64(this.dv, this.origin + 128);
   }
   get ratio(): number {
-    return readF64(this.dv, this.origin + 144);
+    return readF64(this.dv, this.origin + 136);
   }
   get flag(): boolean {
-    return readBool(this.dv, this.origin + 152);
+    return readBool(this.dv, this.origin + 144);
   }
   get small(): number {
-    return readU8(this.dv, this.origin + 153);
+    return readU8(this.dv, this.origin + 145);
   }
   get wide(): number {
-    return readU16(this.dv, this.origin + 154);
+    return readU16(this.dv, this.origin + 146);
   }
   get offset(): number {
-    return readI16(this.dv, this.origin + 156);
+    return readI16(this.dv, this.origin + 148);
   }
   get preciseId(): bigint {
-    return readU64Big(this.dv, this.origin + 160);
+    return readU64Big(this.dv, this.origin + 152);
   }
   get email(): string | null {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 2, UserReader.EXT_FIXED[2]);
-    if (bs === null) return null;
+    const bs = findExtBlockIn(this.dv, UserReader.EXT_VERSIONS, this.hv, 2, UserReader.EXT_FIXED[2], this.origin, this.end);
+    if (bs === null || !readBitmapBit(this.dv, bs, 0)) return null;
     {
       const __origin = bs;
       { const [o, l] = readSlot(this.dv, __origin + 4); return utf8(this.dv, o, l); }
     }
   }
   get score(): number {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 2, UserReader.EXT_FIXED[2]);
+    const bs = findExtBlockIn(this.dv, UserReader.EXT_VERSIONS, this.hv, 2, UserReader.EXT_FIXED[2], this.origin, this.end);
     if (bs === null) { return 0; }
     {
       const __origin = bs;
@@ -631,7 +838,7 @@ export class UserReader {
     }
   }
   get tags2(): StringListView {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 3, UserReader.EXT_FIXED[3]);
+    const bs = findExtBlockIn(this.dv, UserReader.EXT_VERSIONS, this.hv, 3, UserReader.EXT_FIXED[3], this.origin, this.end);
     if (bs === null) { return new StringListView(this.dv, 0, 0); }
     {
       const __origin = bs;
@@ -639,8 +846,8 @@ export class UserReader {
     }
   }
   get vip(): boolean | null {
-    const bs = findExtBlock(this.dv, UserReader.EXT_VERSIONS, this.hv, 3, UserReader.EXT_FIXED[3]);
-    if (bs === null) return null;
+    const bs = findExtBlockIn(this.dv, UserReader.EXT_VERSIONS, this.hv, 3, UserReader.EXT_FIXED[3], this.origin, this.end);
+    if (bs === null || !readBitmapBit(this.dv, bs, 0)) return null;
     {
       const __origin = bs;
       return readBool(this.dv, __origin + 12);
@@ -652,12 +859,13 @@ export class UserReader {
       id: this.id,
       name: this.name,
       color: this.color,
-      profile: this.profile,
+      profile: Profile.fromReader(this.profile),
       matrix: Array.from({ length: this.matrix.length }, (_, i) => this.matrix.get(i)),
       nums: Array.from({ length: this.nums.length }, (_, i) => this.nums.get(i)),
       tags: Array.from({ length: this.tags.length }, (_, i) => this.tags.get(i)),
       blobs: Array.from({ length: this.blobs.length }, (_, i) => new Uint8Array(this.blobs.get(i))),
       edges: Array.from({ length: this.edges.length }, (_, i) => Node.fromReader(this.edges.get(i))),
+      points: Array.from({ length: this.points.length }, (_, i) => Point.fromReader(this.points.get(i))),
       counts: (() => { const o: Record<string, number> = {}; for (let i = 0; i < this.counts.length; i++) o[this.counts.key(i)] = this.counts.value(i); return o; })(),
       byId: (() => { const o: Record<string, Profile> = {}; for (let i = 0; i < this.byId.length; i++) o[this.byId.key(i)] = Profile.fromReader(this.byId.value(i)); return o; })(),
       avatar: this.avatar === null ? null : new Uint8Array(this.avatar),
@@ -681,11 +889,11 @@ function __writeUserBase(w: Writer, base: number, value: User): void {
   w.u64(base + 8, value.id);
   { const b = utf8Encode(value.name); w.slot(base + 16, w.append(b), b.length); }
   w.i32(base + 24, enumNum(Color, value.color));
-  __writeProfileBase(w, base + 28, value.profile);
+  { const s = __writeProfileInstance(w, value.profile); w.slot(base + 28, w.rel(s), w.length - s); }
   {
     const a0: number[] = value.matrix ?? [];
     for (let i0 = 0; i0 < 4; i0++) {
-      w.f32(base + 52 + i0 * 4, a0[i0]);
+      w.f32(base + 36 + i0 * 4, a0[i0]);
     }
   }
   {
@@ -694,7 +902,7 @@ function __writeUserBase(w: Writer, base: number, value: User): void {
     for (let i0 = 0; i0 < a0.length; i0++) {
       w.i32(r0 + i0 * 4, a0[i0]);
     }
-    w.slot(base + 68, w.rel(r0), a0.length);
+    w.slot(base + 52, w.rel(r0), a0.length);
   }
   {
     const a0: string[] = value.tags ?? [];
@@ -702,7 +910,7 @@ function __writeUserBase(w: Writer, base: number, value: User): void {
     for (let i0 = 0; i0 < a0.length; i0++) {
       { const b = utf8Encode(a0[i0]); w.slot(r0 + i0 * 8, w.append(b), b.length); }
     }
-    w.slot(base + 76, w.rel(r0), a0.length);
+    w.slot(base + 60, w.rel(r0), a0.length);
   }
   {
     const a0: Uint8Array[] = value.blobs ?? [];
@@ -710,7 +918,7 @@ function __writeUserBase(w: Writer, base: number, value: User): void {
     for (let i0 = 0; i0 < a0.length; i0++) {
       w.slot(r0 + i0 * 8, w.append(a0[i0]), a0[i0].length);
     }
-    w.slot(base + 84, w.rel(r0), a0.length);
+    w.slot(base + 68, w.rel(r0), a0.length);
   }
   {
     const a0: Node[] = value.edges ?? [];
@@ -718,7 +926,15 @@ function __writeUserBase(w: Writer, base: number, value: User): void {
     for (let i0 = 0; i0 < a0.length; i0++) {
       __writeNodeBase(w, r0 + i0 * 12, a0[i0]);
     }
-    w.slot(base + 92, w.rel(r0), a0.length);
+    w.slot(base + 76, w.rel(r0), a0.length);
+  }
+  {
+    const a0: Point[] = value.points ?? [];
+    const r0 = w.reserve(a0.length * 8);
+    for (let i0 = 0; i0 < a0.length; i0++) {
+      __writePointBase(w, r0 + i0 * 8, a0[i0]);
+    }
+    w.slot(base + 84, w.rel(r0), a0.length);
   }
   {
     const o: Record<string, number> = value.counts ?? {};
@@ -730,86 +946,147 @@ function __writeUserBase(w: Writer, base: number, value: User): void {
       { const b = utf8Encode(k); w.slot(e, w.append(b), b.length); }
       w.u32(e + 8, o[k]);
     }
-    w.slot(base + 100, w.rel(r), ks.length);
+    w.slot(base + 92, w.rel(r), ks.length);
   }
   {
     const o: Record<string, Profile> = value.byId ?? {};
     const es = Object.keys(o).map((k) => [BigInt(k), k] as [bigint, string]);
     es.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-    const r = w.reserve(es.length * 32);
+    const r = w.reserve(es.length * 16);
     for (let i = 0; i < es.length; i++) {
-      const e = r + i * 32;
+      const e = r + i * 16;
       const k = es[i][1];
       w.u64(e, es[i][0]);
-      __writeProfileBase(w, e + 8, o[k]);
+      { const s = __writeProfileInstance(w, o[k]); w.slot(e + 8, w.rel(s), w.length - s); }
     }
-    w.slot(base + 108, w.rel(r), es.length);
+    w.slot(base + 100, w.rel(r), (es.length | SHAPE_BIT) >>> 0);
   }
   {
     const v = value.avatar;
     if (v !== null && v !== undefined) {
       w.bit(base, 0);
-      w.slot(base + 116, w.append(v), v.length);
+      w.slot(base + 108, w.append(v), v.length);
     }
   }
   {
     const v = value.motto;
     if (v !== null && v !== undefined) {
       w.bit(base, 1);
-      { const b = utf8Encode(v); w.slot(base + 124, w.append(b), b.length); }
+      { const b = utf8Encode(v); w.slot(base + 116, w.append(b), b.length); }
     }
   }
-  w.i64(base + 136, value.stamp);
-  w.f64(base + 144, value.ratio);
-  w.bool(base + 152, value.flag);
-  w.u8(base + 153, value.small);
-  w.u16(base + 154, value.wide);
-  w.i16(base + 156, value.offset);
-  w.u64(base + 160, value.preciseId);
+  w.i64(base + 128, value.stamp);
+  w.f64(base + 136, value.ratio);
+  w.bool(base + 144, value.flag);
+  w.u8(base + 145, value.small);
+  w.u16(base + 146, value.wide);
+  w.i16(base + 148, value.offset);
+  w.u64(base + 152, value.preciseId);
+}
+
+function __writeUserExt(w: Writer, value: User): void {
+  {
+    const blk = w.reserve(24);
+    {
+      const v = value.email;
+      if (v !== null && v !== undefined) {
+        w.bit(blk, 0);
+        { const b = utf8Encode(v); w.slot(blk + 4, w.append(b), b.length); }
+      }
+    }
+    w.f64(blk + 16, value.score);
+    w.trailer(blk, 2);
+  }
+  {
+    const blk = w.reserve(16);
+    {
+      const a0: string[] = value.tags2 ?? [];
+      const r0 = w.reserve(a0.length * 8);
+      for (let i0 = 0; i0 < a0.length; i0++) {
+        { const b = utf8Encode(a0[i0]); w.slot(r0 + i0 * 8, w.append(b), b.length); }
+      }
+      w.slot(blk + 4, w.rel(r0), a0.length);
+    }
+    {
+      const v = value.vip;
+      if (v !== null && v !== undefined) {
+        w.bit(blk, 0);
+        w.bool(blk + 12, v);
+      }
+    }
+    w.trailer(blk, 3);
+  }
+}
+
+function __writeUserInstance(w: Writer, value: User): number {
+  const s = w.reserve(160);
+  __writeUserBase(w, s, value);
+  __writeUserExt(w, value);
+  return s;
 }
 
 function __validateUserBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {
   vStr(dv, base + 16, path, 'name');
   vEnum(Color, 'Color', dv, base + 24, path, 'color');
-  __validateProfileBase(dv, base + 28, hv, [...path, 'profile']);
-  vRegion(dv, base + 68, 4, path, 'nums');
+  { const [lo, hi] = vInstance(dv, base + 28, path, 'profile'); __validateProfileInst(dv, lo, hi, [...path, 'profile']); }
+  vRegion(dv, base + 52, 4, path, 'nums');
   {
-    const [o0, n0] = vRegion(dv, base + 76, 8, path, 'tags');
+    const [o0, n0] = vRegion(dv, base + 60, 8, path, 'tags');
     for (let i0 = 0; i0 < n0; i0++) {
       vStr(dv, o0 + i0 * 8, path, 'tags', i0);
     }
   }
   {
-    const [o0, n0] = vRegion(dv, base + 84, 8, path, 'blobs');
+    const [o0, n0] = vRegion(dv, base + 68, 8, path, 'blobs');
     for (let i0 = 0; i0 < n0; i0++) {
       vSlot(dv, o0 + i0 * 8, path, 'blobs', i0);
     }
   }
   {
-    const [o0, n0] = vRegion(dv, base + 92, 12, path, 'edges');
-    for (let i0 = 0; i0 < n0; i0++) {
-      __validateNodeBase(dv, o0 + i0 * 12, hv, [...path, 'edges', i0]);
+    const [o0, n0, s0] = vRegionShape(dv, base + 76, path, 'edges');
+    if (s0) {
+      for (let i0 = 0; i0 < n0; i0++) {
+        const [lo, hi] = vInstance(dv, o0 + i0 * 8, path, 'edges', i0); __validateNodeInst(dv, lo, hi, [...path, 'edges', i0]);
+      }
+    } else {
+      vExtent(dv, o0, n0, 12, path, 'edges');
+      for (let i0 = 0; i0 < n0; i0++) __validateNodeBase(dv, o0 + i0 * 12, 0, [...path, 'edges', i0]);
     }
   }
   {
-    const [o0, n0] = vRegion(dv, base + 100, 12, path, 'counts');
+    const [o0, n0, s0] = vRegionShape(dv, base + 84, path, 'points');
+    if (s0) {
+      for (let i0 = 0; i0 < n0; i0++) {
+        const [lo, hi] = vInstance(dv, o0 + i0 * 8, path, 'points', i0); __validatePointInst(dv, lo, hi, [...path, 'points', i0]);
+      }
+    } else {
+      vExtent(dv, o0, n0, 8, path, 'points');
+      for (let i0 = 0; i0 < n0; i0++) __validatePointBase(dv, o0 + i0 * 8, 0, [...path, 'points', i0]);
+    }
+  }
+  {
+    const [o0, n0] = vRegion(dv, base + 92, 12, path, 'counts');
     for (let i0 = 0; i0 < n0; i0++) {
       const e = o0 + i0 * 12;
       vStr(dv, e, path, 'counts', i0);
     }
   }
   {
-    const [o0, n0] = vRegion(dv, base + 108, 32, path, 'byId');
+    const [o0, n0, s0] = vRegionShape(dv, base + 100, path, 'byId');
+    const st = s0 ? 16 : 32;
+    const vo = s0 ? 8 : 8;
+    vExtent(dv, o0, n0, st, path, 'byId');
     for (let i0 = 0; i0 < n0; i0++) {
-      const e = o0 + i0 * 32;
-      __validateProfileBase(dv, e + 8, hv, [...path, 'byId', i0]);
+      const e = o0 + i0 * st;
+      if (s0) { const [lo, hi] = vInstance(dv, e + vo, path, 'byId', i0); __validateProfileInst(dv, lo, hi, [...path, 'byId', i0]); }
+      else __validateProfileBase(dv, e + vo, 0, [...path, 'byId', i0]);
     }
   }
   if (readBitmapBit(dv, base, 0)) {
-    vSlot(dv, base + 116, path, 'avatar');
+    vSlot(dv, base + 108, path, 'avatar');
   }
   if (readBitmapBit(dv, base, 1)) {
-    vStr(dv, base + 124, path, 'motto');
+    vStr(dv, base + 116, path, 'motto');
   }
 }
 function __validateUserV2(dv: DataView, base: number, hv: number, path: ValidationPath): void {
@@ -827,6 +1104,17 @@ function __validateUserV3(dv: DataView, base: number, hv: number, path: Validati
   if (readBitmapBit(dv, base, 0)) {
   }
 }
+function __validateUserInst(dv: DataView, lo: number, hi: number, path: ValidationPath): void {
+  __validateUserBase(dv, lo, INSTANCE_HV, path);
+  {
+    const bs = findExtBlockIn(dv, UserReader.EXT_VERSIONS, INSTANCE_HV, 3, 16, lo, hi);
+    if (bs !== null) __validateUserV3(dv, bs, INSTANCE_HV, path);
+  }
+  {
+    const bs = findExtBlockIn(dv, UserReader.EXT_VERSIONS, INSTANCE_HV, 2, 24, lo, hi);
+    if (bs !== null) __validateUserV2(dv, bs, INSTANCE_HV, path);
+  }
+}
 
 export interface User {
   id: number;
@@ -838,6 +1126,7 @@ export interface User {
   tags: string[];
   blobs: Uint8Array[];
   edges: Node[];
+  points: Point[];
   counts: Record<string, number>;
   byId: Record<string, Profile>;
   avatar: Uint8Array | null;
@@ -869,12 +1158,12 @@ export namespace User {
     /** Strictly check an untrusted buffer; after null no getter can throw. */
     export function validate(buf: Uint8Array): ValidationError | null {
       try {
-        if (buf.length < 176) throw new ValidationError(`buffer too short: need 176 bytes, got ${buf.length}`);
+        if (buf.length < 168) throw new ValidationError(`buffer too short: need 168 bytes, got ${buf.length}`);
         const full = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
         const key = full.getUint32(0, true);
         if (key !== 1) throw new ValidationError(`key mismatch: expected 1, got ${key}`);
         const fl = full.getUint16(4, true);
-        if (fl !== 168) throw new ValidationError(`header fixed_len mismatch: expected 168, got ${fl}`);
+        if (fl !== 160) throw new ValidationError(`header fixed_len mismatch: expected 160, got ${fl}`);
         const hv = full.getUint8(6);
         const dv = new DataView(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
         const path: ValidationPath = [];
@@ -898,43 +1187,13 @@ export namespace User {
 
     /** Canonical encoding (byte-identical to Rust): declaration-order var data, sorted map keys. */
     export function encode(value: User): Uint8Array {
-      const w = new Writer(176);
+      const w = new Writer(168);
       w.reserve(8);
-      const base = w.reserve(168);
+      const base = w.reserve(160);
       __writeUserBase(w, base, value);
-      {
-        const blk = w.reserve(24);
-        {
-          const v = value.email;
-          if (v !== null && v !== undefined) {
-            w.bit(blk, 0);
-            { const b = utf8Encode(v); w.slot(blk + 4, w.append(b), b.length); }
-          }
-        }
-        w.f64(blk + 16, value.score);
-        w.trailer(blk, 2);
-      }
-      {
-        const blk = w.reserve(16);
-        {
-          const a0: string[] = value.tags2 ?? [];
-          const r0 = w.reserve(a0.length * 8);
-          for (let i0 = 0; i0 < a0.length; i0++) {
-            { const b = utf8Encode(a0[i0]); w.slot(r0 + i0 * 8, w.append(b), b.length); }
-          }
-          w.slot(blk + 4, w.rel(r0), a0.length);
-        }
-        {
-          const v = value.vip;
-          if (v !== null && v !== undefined) {
-            w.bit(blk, 0);
-            w.bool(blk + 12, v);
-          }
-        }
-        w.trailer(blk, 3);
-      }
+      __writeUserExt(w, value);
       w.u32(0, 1);
-      w.u16(4, 168);
+      w.u16(4, 160);
       w.u8(6, 3);
       w.u8(7, 0);
       return w.finish();
@@ -943,8 +1202,9 @@ export namespace User {
 }
 
 export class CountsMapView {
-  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {}
-  get length(): number { return this.count; }
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly rawLen: number) {}
+  get length(): number { return this.rawLen & LEN_MASK; }
+  private get inst(): boolean { return this.rawLen >= SHAPE_BIT; }
   key(i: number): string {
     const e = this.start + i * 12;
     const [o, l] = readSlot(this.dv, e); return utf8(this.dv, o, l);
@@ -958,15 +1218,17 @@ export class CountsMapView {
 
 
 export class ByIdMapView {
-  constructor(private readonly dv: DataView, private readonly start: number, private readonly count: number) {}
-  get length(): number { return this.count; }
+  constructor(private readonly dv: DataView, private readonly start: number, private readonly rawLen: number) {}
+  get length(): number { return this.rawLen & LEN_MASK; }
+  private get inst(): boolean { return this.rawLen >= SHAPE_BIT; }
   key(i: number): number {
-    const e = this.start + i * 32;
+    const e = this.start + i * (this.inst ? 16 : 32);
     return readU64(this.dv, e);
   }
   value(i: number): ProfileReader {
-    const e = this.start + i * 32 + 8;
-    return new ProfileReader(this.dv, e, 0);
+    const e = this.start + i * (this.inst ? 16 : 32) + (this.inst ? 8 : 8);
+    if (this.inst) { const [o, l] = readSlot(this.dv, e); return new ProfileReader(this.dv, o, o + l, INSTANCE_HV); }
+    return new ProfileReader(this.dv, e, this.dv.byteLength, 0);
   }
   entry(i: number): [number, ProfileReader] { return [this.key(i), this.value(i)]; }
 }
@@ -979,6 +1241,7 @@ export function decodeBy(buf: Uint8Array) {
   switch (key) {
     case 4: return LegacyReader.decode(buf);
     case 3: return NodeReader.decode(buf);
+    case 6: return PointReader.decode(buf);
     case 2: return ProfileReader.decode(buf);
     case 5: return TallyReader.decode(buf);
     case 1: return UserReader.decode(buf);

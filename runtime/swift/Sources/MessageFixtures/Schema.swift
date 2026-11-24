@@ -24,18 +24,21 @@ public struct LegacyReader: MessageReader {
   /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
   public let msg: RawMessage
   let origin: Int
-  /// The writer's highest extension version.
+  /// End of the extent this view may read (payload end, or instance end for nested structs).
+  let end: Int
+  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).
   public let hv: UInt8
-  public init(msg: RawMessage, origin: Int, hv: UInt8) {
+  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {
     self.msg = msg
     self.origin = origin
+    self.end = end
     self.hv = hv
   }
   /// Lazy decode: nil only when the buffer is too short or the key does not match. Call
   /// `Legacy.validate` first on untrusted input.
   public static func decode(_ data: Data) -> LegacyReader? {
     guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else { return nil }
-    return LegacyReader(msg: m, origin: 0, hv: m.version)
+    return LegacyReader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)
   }
   public var id: UInt32 { msg.readU32(origin + 0) }
   public var note: String { msg.readString(origin + 16) }
@@ -55,10 +58,18 @@ func __writeLegacyBase(_ w: inout Writer, _ base: Int, _ value: Legacy) {
   w.writeU32(base + 0, value.id)
   w.writeStringSlot(base + 16, value.note)
 }
+func __writeLegacyInstance(_ w: inout Writer, _ value: Legacy) -> Int {
+  let s = w.reserve(24)
+  __writeLegacyBase(&w, s, value)
+  return s
+}
 func __validateLegacyBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
   try nest("note") {
     try checkStrSlot(m, base + 16)
   }
+}
+func __validateLegacyInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
+  try __validateLegacyBase(m, lo, INSTANCE_HV)
 }
 extension Legacy {
   public static func decode(_ data: Data) -> LegacyReader? {
@@ -99,21 +110,24 @@ public struct NodeReader: MessageReader {
   /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
   public let msg: RawMessage
   let origin: Int
-  /// The writer's highest extension version.
+  /// End of the extent this view may read (payload end, or instance end for nested structs).
+  let end: Int
+  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).
   public let hv: UInt8
-  public init(msg: RawMessage, origin: Int, hv: UInt8) {
+  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {
     self.msg = msg
     self.origin = origin
+    self.end = end
     self.hv = hv
   }
   /// Lazy decode: nil only when the buffer is too short or the key does not match. Call
   /// `Node.validate` first on untrusted input.
   public static func decode(_ data: Data) -> NodeReader? {
     guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else { return nil }
-    return NodeReader(msg: m, origin: 0, hv: m.version)
+    return NodeReader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)
   }
   public var value: UInt32 { msg.readU32(origin + 0) }
-  public var children: StructListView<NodeReader> { { let (o, l) = msg.readSlot(origin + 4); return StructListView<NodeReader>(msg: msg, start: Int(o), count: Int(l), stride: 12) }() }
+  public var children: StructEvoListView<NodeReader> { { let (o, l) = msg.readSlot(origin + 4); return StructEvoListView<NodeReader>(msg: msg, start: Int(o), rawLen: UInt32(Int(l))) }() }
   public func toOwned() -> Node {
     Node(value: value, children: children.map { $0.toOwned() })
   }
@@ -137,15 +151,33 @@ func __writeNodeBase(_ w: inout Writer, _ base: Int, _ value: Node) {
     w.writeSlot(base + 4, w.rel(r0), a0.count)
   }
 }
+func __writeNodeInstance(_ w: inout Writer, _ value: Node) -> Int {
+  let s = w.reserve(12)
+  __writeNodeBase(&w, s, value)
+  return s
+}
 func __validateNodeBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
   do {
-    let (o0, n0) = try checkRegion(m, base + 4, 12, "children")
-    for i0 in 0..<n0 {
-      try nest("children", i0) {
-        try __validateNodeBase(m, o0 + i0 * 12, hv)
+    let (o0, n0, s0) = try checkRegionShape(m, base + 4, "children")
+    if s0 {
+      for i0 in 0..<n0 {
+        try nest("children", i0) {
+          let (lo, hi) = try checkInstance(m, o0 + i0 * 8)
+          try __validateNodeInst(m, lo, hi)
+        }
+      }
+    } else {
+      try checkExtent(m, o0, n0, 12, "children")
+      for i0 in 0..<n0 {
+        try nest("children", i0) {
+          try __validateNodeBase(m, o0 + i0 * 12, 0)
+        }
       }
     }
   }
+}
+func __validateNodeInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
+  try __validateNodeBase(m, lo, INSTANCE_HV)
 }
 extension Node {
   public static func decode(_ data: Data) -> NodeReader? {
@@ -179,25 +211,111 @@ extension Node {
     return w.finish()
   }
 }
-public struct ProfileReader: MessageReader {
-  public static let KEY: UInt32 = 2
-  public static let fixedLen: Int = 24
+public struct PointReader: MessageReader {
+  public static let KEY: UInt32 = 6
+  public static let fixedLen: Int = 8
   public static let EXT_VERSIONS: [UInt16] = []
   /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
   public let msg: RawMessage
   let origin: Int
-  /// The writer's highest extension version.
+  /// End of the extent this view may read (payload end, or instance end for nested structs).
+  let end: Int
+  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).
   public let hv: UInt8
-  public init(msg: RawMessage, origin: Int, hv: UInt8) {
+  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {
     self.msg = msg
     self.origin = origin
+    self.end = end
+    self.hv = hv
+  }
+  /// Lazy decode: nil only when the buffer is too short or the key does not match. Call
+  /// `Point.validate` first on untrusted input.
+  public static func decode(_ data: Data) -> PointReader? {
+    guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else { return nil }
+    return PointReader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)
+  }
+  public var x: Float { msg.readF32(origin + 0) }
+  public var y: Float { msg.readF32(origin + 4) }
+  public func toOwned() -> Point {
+    Point(x: x, y: y)
+  }
+}
+public struct Point: Equatable {
+  public var x: Float
+  public var y: Float
+  public init(x: Float, y: Float) {
+    self.x = x
+    self.y = y
+  }
+}
+func __writePointBase(_ w: inout Writer, _ base: Int, _ value: Point) {
+  w.writeF32(base + 0, value.x)
+  w.writeF32(base + 4, value.y)
+}
+func __writePointInstance(_ w: inout Writer, _ value: Point) -> Int {
+  let s = w.reserve(8)
+  __writePointBase(&w, s, value)
+  return s
+}
+func __validatePointBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
+}
+func __validatePointInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
+  try __validatePointBase(m, lo, INSTANCE_HV)
+}
+extension Point {
+  public static func decode(_ data: Data) -> PointReader? {
+    PointReader.decode(data)
+  }
+  public static func fromBytes(_ data: Data) -> Point? {
+    PointReader.decode(data)?.toOwned()
+  }
+  /// Strictly check an untrusted buffer; after nil no accessor can trap.
+  public static func validate(_ data: Data) -> ValidationError? {
+    do {
+      let m = try RawMessage(validating: data, key: PointReader.KEY, fixedLen: PointReader.fixedLen)
+      try __validatePointBase(m, 0, m.version)
+      return nil
+    } catch let e as ValidationError {
+      return e
+    } catch {
+      preconditionFailure("validate can only throw ValidationError")
+    }
+  }
+  /// Canonical encoding (byte-identical to Rust and TS): declaration-order var data, sorted map keys.
+  public func encode() -> Data {
+    var w = Writer(capacity: 16)
+    w.reserve(8)
+    let base = w.reserve(8)
+    __writePointBase(&w, base, self)
+    w.writeU32(0, 6)
+    w.writeU16(4, 8)
+    w.writeU8(6, 0)
+    w.writeU8(7, 0)
+    return w.finish()
+  }
+}
+public struct ProfileReader: MessageReader {
+  public static let KEY: UInt32 = 2
+  public static let fixedLen: Int = 24
+  public static let EXT_VERSIONS: [UInt16] = [2]
+  /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
+  public let msg: RawMessage
+  let origin: Int
+  /// End of the extent this view may read (payload end, or instance end for nested structs).
+  let end: Int
+  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).
+  public let hv: UInt8
+  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {
+    self.msg = msg
+    self.origin = origin
+    self.end = end
     self.hv = hv
   }
   /// Lazy decode: nil only when the buffer is too short or the key does not match. Call
   /// `Profile.validate` first on untrusted input.
   public static func decode(_ data: Data) -> ProfileReader? {
     guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else { return nil }
-    return ProfileReader(msg: m, origin: 0, hv: m.version)
+    return ProfileReader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)
   }
   public var age: UInt32 { msg.readU32(origin + 4) }
   public var bio: String { msg.readString(origin + 8) }
@@ -205,18 +323,24 @@ public struct ProfileReader: MessageReader {
     guard msg.bitmapBit(origin, 0) else { return nil }
     return msg.readString(origin + 16)
   }
+  public var verified: Bool? {
+    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 2, 8, lo: origin, hi: end), msg.bitmapBit(bs, 0) else { return nil }
+    return msg.readBool(bs + 4)
+  }
   public func toOwned() -> Profile {
-    Profile(age: age, bio: bio, nickname: nickname)
+    Profile(age: age, bio: bio, nickname: nickname, verified: verified)
   }
 }
 public struct Profile: Equatable {
   public var age: UInt32
   public var bio: String
   public var nickname: String?
-  public init(age: UInt32, bio: String, nickname: String?) {
+  public var verified: Bool?
+  public init(age: UInt32, bio: String, nickname: String?, verified: Bool?) {
     self.age = age
     self.bio = bio
     self.nickname = nickname
+    self.verified = verified
   }
 }
 func __writeProfileBase(_ w: inout Writer, _ base: Int, _ value: Profile) {
@@ -227,6 +351,22 @@ func __writeProfileBase(_ w: inout Writer, _ base: Int, _ value: Profile) {
     w.writeStringSlot(base + 16, v)
   }
 }
+func __writeProfileExt(_ w: inout Writer, _ value: Profile) {
+  do {
+    let blk = w.reserve(8)
+    if let v = value.verified {
+      w.setBit(blk, 0)
+      w.writeBool(blk + 4, v)
+    }
+    w.writeTrailer(blk, 2)
+  }
+}
+func __writeProfileInstance(_ w: inout Writer, _ value: Profile) -> Int {
+  let s = w.reserve(24)
+  __writeProfileBase(&w, s, value)
+  __writeProfileExt(&w, value)
+  return s
+}
 func __validateProfileBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
   try nest("bio") {
     try checkStrSlot(m, base + 8)
@@ -236,6 +376,12 @@ func __validateProfileBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
       try checkStrSlot(m, base + 16)
     }
   }
+}
+func __validateProfileV2(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
+}
+func __validateProfileInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
+  try __validateProfileBase(m, lo, INSTANCE_HV)
+  if let bs = m.findExtBlock(ProfileReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo: lo, hi: hi) { try __validateProfileV2(m, bs, INSTANCE_HV) }
 }
 extension Profile {
   public static func decode(_ data: Data) -> ProfileReader? {
@@ -249,6 +395,10 @@ extension Profile {
     do {
       let m = try RawMessage(validating: data, key: ProfileReader.KEY, fixedLen: ProfileReader.fixedLen)
       try __validateProfileBase(m, 0, m.version)
+      if m.version >= 2 {
+        let bs = try checkExtBlock(m, ProfileReader.EXT_VERSIONS, m.version, 2, 8)
+        try __validateProfileV2(m, bs, m.version)
+      }
       return nil
     } catch let e as ValidationError {
       return e
@@ -262,9 +412,10 @@ extension Profile {
     w.reserve(8)
     let base = w.reserve(24)
     __writeProfileBase(&w, base, self)
+    __writeProfileExt(&w, self)
     w.writeU32(0, 2)
     w.writeU16(4, 24)
-    w.writeU8(6, 0)
+    w.writeU8(6, 2)
     w.writeU8(7, 0)
     return w.finish()
   }
@@ -276,21 +427,24 @@ public struct TallyReader: MessageReader {
   /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
   public let msg: RawMessage
   let origin: Int
-  /// The writer's highest extension version.
+  /// End of the extent this view may read (payload end, or instance end for nested structs).
+  let end: Int
+  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).
   public let hv: UInt8
-  public init(msg: RawMessage, origin: Int, hv: UInt8) {
+  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {
     self.msg = msg
     self.origin = origin
+    self.end = end
     self.hv = hv
   }
   /// Lazy decode: nil only when the buffer is too short or the key does not match. Call
   /// `Tally.validate` first on untrusted input.
   public static func decode(_ data: Data) -> TallyReader? {
     guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else { return nil }
-    return TallyReader(msg: m, origin: 0, hv: m.version)
+    return TallyReader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)
   }
-  public var usage: UsageMapView { { let (o, l) = msg.readSlot(origin + 0); return UsageMapView(msg: msg, start: Int(o), count: Int(l)) }() }
-  public var labels: LabelsMapView { { let (o, l) = msg.readSlot(origin + 8); return LabelsMapView(msg: msg, start: Int(o), count: Int(l)) }() }
+  public var usage: UsageMapView { { let (o, l) = msg.readSlot(origin + 0); return UsageMapView(msg: msg, start: Int(o), rawLen: l) }() }
+  public var labels: LabelsMapView { { let (o, l) = msg.readSlot(origin + 8); return LabelsMapView(msg: msg, start: Int(o), rawLen: l) }() }
   public var aliases: StringListView { { let (o, l) = msg.readSlot(origin + 16); return StringListView(msg: msg, start: Int(o), count: Int(l)) }() }
   public var grid: SlotListView { { let (o, l) = msg.readSlot(origin + 24); return SlotListView(msg: msg, start: Int(o), count: Int(l)) }() }
   public func toOwned() -> Tally {
@@ -300,12 +454,16 @@ public struct TallyReader: MessageReader {
 public struct UsageMapView: Sequence {
   let msg: RawMessage
   let start: Int
-  public let count: Int
-  static let stride = 8
-  static let vOff = 4
+  let rawLen: UInt32
+  public var count: Int { Int(rawLen & LEN_MASK) }
+  var inst: Bool { rawLen & SHAPE_BIT != 0 }
+  var stride: Int { 8 }
+  var vOff: Int { 4 }
   public var isEmpty: Bool { count == 0 }
-  public func key(at i: Int) -> Color { Color(rawValue: msg.readI32(start + i * Self.stride))! }
-  public func value(at i: Int) -> UInt32 { msg.readU32(start + i * Self.stride + Self.vOff) }
+  public func key(at i: Int) -> Color { Color(rawValue: msg.readI32(start + i * stride))! }
+  public func value(at i: Int) -> UInt32 {
+    return msg.readU32(start + i * stride + vOff)
+  }
   public func entry(at i: Int) -> (Color, UInt32) { (key(at: i), value(at: i)) }
   public struct Iterator: IteratorProtocol {
     let view: UsageMapView
@@ -322,12 +480,16 @@ public struct UsageMapView: Sequence {
 public struct LabelsMapView: Sequence {
   let msg: RawMessage
   let start: Int
-  public let count: Int
-  static let stride = 16
-  static let vOff = 8
+  let rawLen: UInt32
+  public var count: Int { Int(rawLen & LEN_MASK) }
+  var inst: Bool { rawLen & SHAPE_BIT != 0 }
+  var stride: Int { 16 }
+  var vOff: Int { 8 }
   public var isEmpty: Bool { count == 0 }
-  public func key(at i: Int) -> String { msg.readString(start + i * Self.stride) }
-  public func value(at i: Int) -> StringListView { { let (o, l) = msg.readSlot(start + i * Self.stride + Self.vOff); return StringListView(msg: msg, start: Int(o), count: Int(l)) }() }
+  public func key(at i: Int) -> String { msg.readString(start + i * stride) }
+  public func value(at i: Int) -> StringListView {
+    return { let (o, l) = msg.readSlot(start + i * stride + vOff); return StringListView(msg: msg, start: Int(o), count: Int(l)) }()
+  }
   public func entry(at i: Int) -> (String, StringListView) { (key(at: i), value(at: i)) }
   public struct Iterator: IteratorProtocol {
     let view: LabelsMapView
@@ -407,6 +569,11 @@ func __writeTallyBase(_ w: inout Writer, _ base: Int, _ value: Tally) {
     w.writeSlot(base + 24, w.rel(r0), a0.count)
   }
 }
+func __writeTallyInstance(_ w: inout Writer, _ value: Tally) -> Int {
+  let s = w.reserve(32)
+  __writeTallyBase(&w, s, value)
+  return s
+}
 func __validateTallyBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
   do {
     let (o0, n0) = try checkRegion(m, base + 0, 8, "usage")
@@ -452,6 +619,9 @@ func __validateTallyBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
     }
   }
 }
+func __validateTallyInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
+  try __validateTallyBase(m, lo, INSTANCE_HV)
+}
 extension Tally {
   public static func decode(_ data: Data) -> TallyReader? {
     TallyReader.decode(data)
@@ -486,79 +656,87 @@ extension Tally {
 }
 public struct UserReader: MessageReader {
   public static let KEY: UInt32 = 1
-  public static let fixedLen: Int = 168
+  public static let fixedLen: Int = 160
   public static let EXT_VERSIONS: [UInt16] = [2, 3]
   /// The underlying buffer (payload-relative offsets); lets callers build views themselves.
   public let msg: RawMessage
   let origin: Int
-  /// The writer's highest extension version.
+  /// End of the extent this view may read (payload end, or instance end for nested structs).
+  let end: Int
+  /// The writer's highest extension version (INSTANCE_HV inside self-contained instances).
   public let hv: UInt8
-  public init(msg: RawMessage, origin: Int, hv: UInt8) {
+  public init(msg: RawMessage, origin: Int, end: Int, hv: UInt8) {
     self.msg = msg
     self.origin = origin
+    self.end = end
     self.hv = hv
   }
   /// Lazy decode: nil only when the buffer is too short or the key does not match. Call
   /// `User.validate` first on untrusted input.
   public static func decode(_ data: Data) -> UserReader? {
     guard let m = RawMessage(decoding: data, key: KEY, fixedLen: fixedLen) else { return nil }
-    return UserReader(msg: m, origin: 0, hv: m.version)
+    return UserReader(msg: m, origin: 0, end: m.payloadCount, hv: m.version)
   }
   public var id: UInt64 { msg.readU64(origin + 8) }
   public var name: String { msg.readString(origin + 16) }
   public var color: Color { Color(rawValue: msg.readI32(origin + 24))! }
-  public var profile: ProfileReader { ProfileReader(msg: msg, origin: origin + 28, hv: hv) }
-  public var matrix: ScalarListView<Float> { ScalarListView<Float>(msg: msg, start: origin + 52, count: 4, stride: 4) }
-  public var nums: ScalarListView<Int32> { { let (o, l) = msg.readSlot(origin + 68); return ScalarListView<Int32>(msg: msg, start: Int(o), count: Int(l), stride: 4) }() }
-  public var tags: StringListView { { let (o, l) = msg.readSlot(origin + 76); return StringListView(msg: msg, start: Int(o), count: Int(l)) }() }
-  public var blobs: BytesListView { { let (o, l) = msg.readSlot(origin + 84); return BytesListView(msg: msg, start: Int(o), count: Int(l)) }() }
-  public var edges: StructListView<NodeReader> { { let (o, l) = msg.readSlot(origin + 92); return StructListView<NodeReader>(msg: msg, start: Int(o), count: Int(l), stride: 12) }() }
-  public var counts: CountsMapView { { let (o, l) = msg.readSlot(origin + 100); return CountsMapView(msg: msg, start: Int(o), count: Int(l)) }() }
-  public var byId: ByIdMapView { { let (o, l) = msg.readSlot(origin + 108); return ByIdMapView(msg: msg, start: Int(o), count: Int(l)) }() }
+  public var profile: ProfileReader { { let (o, l) = msg.readSlot(origin + 28); return ProfileReader(msg: msg, origin: Int(o), end: Int(o) + Int(l), hv: INSTANCE_HV) }() }
+  public var matrix: ScalarListView<Float> { ScalarListView<Float>(msg: msg, start: origin + 36, count: 4, stride: 4) }
+  public var nums: ScalarListView<Int32> { { let (o, l) = msg.readSlot(origin + 52); return ScalarListView<Int32>(msg: msg, start: Int(o), count: Int(l), stride: 4) }() }
+  public var tags: StringListView { { let (o, l) = msg.readSlot(origin + 60); return StringListView(msg: msg, start: Int(o), count: Int(l)) }() }
+  public var blobs: BytesListView { { let (o, l) = msg.readSlot(origin + 68); return BytesListView(msg: msg, start: Int(o), count: Int(l)) }() }
+  public var edges: StructEvoListView<NodeReader> { { let (o, l) = msg.readSlot(origin + 76); return StructEvoListView<NodeReader>(msg: msg, start: Int(o), rawLen: UInt32(Int(l))) }() }
+  public var points: StructEvoListView<PointReader> { { let (o, l) = msg.readSlot(origin + 84); return StructEvoListView<PointReader>(msg: msg, start: Int(o), rawLen: UInt32(Int(l))) }() }
+  public var counts: CountsMapView { { let (o, l) = msg.readSlot(origin + 92); return CountsMapView(msg: msg, start: Int(o), rawLen: l) }() }
+  public var byId: ByIdMapView { { let (o, l) = msg.readSlot(origin + 100); return ByIdMapView(msg: msg, start: Int(o), rawLen: l) }() }
   public var avatar: Data? {
     guard msg.bitmapBit(origin, 0) else { return nil }
-    return msg.readBytes(origin + 116)
+    return msg.readBytes(origin + 108)
   }
   public var motto: String? {
     guard msg.bitmapBit(origin, 1) else { return nil }
-    return msg.readString(origin + 124)
+    return msg.readString(origin + 116)
   }
-  public var stamp: Int64 { msg.readI64(origin + 136) }
-  public var ratio: Double { msg.readF64(origin + 144) }
-  public var flag: Bool { msg.readBool(origin + 152) }
-  public var small: UInt8 { msg.readU8(origin + 153) }
-  public var wide: UInt16 { msg.readU16(origin + 154) }
-  public var offset: Int16 { msg.readI16(origin + 156) }
-  public var preciseId: UInt64 { msg.readU64(origin + 160) }
+  public var stamp: Int64 { msg.readI64(origin + 128) }
+  public var ratio: Double { msg.readF64(origin + 136) }
+  public var flag: Bool { msg.readBool(origin + 144) }
+  public var small: UInt8 { msg.readU8(origin + 145) }
+  public var wide: UInt16 { msg.readU16(origin + 146) }
+  public var offset: Int16 { msg.readI16(origin + 148) }
+  public var preciseId: UInt64 { msg.readU64(origin + 152) }
   public var email: String? {
-    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 2, 24), msg.bitmapBit(bs, 0) else { return nil }
+    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 2, 24, lo: origin, hi: end), msg.bitmapBit(bs, 0) else { return nil }
     return msg.readString(bs + 4)
   }
   public var score: Double {
-    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 2, 24) else { return 0 }
+    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 2, 24, lo: origin, hi: end) else { return 0 }
     return msg.readF64(bs + 16)
   }
   public var tags2: StringListView {
-    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 3, 16) else { return StringListView(msg: msg, start: 0, count: 0) }
+    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 3, 16, lo: origin, hi: end) else { return StringListView(msg: msg, start: 0, count: 0) }
     return { let (o, l) = msg.readSlot(bs + 4); return StringListView(msg: msg, start: Int(o), count: Int(l)) }()
   }
   public var vip: Bool? {
-    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 3, 16), msg.bitmapBit(bs, 0) else { return nil }
+    guard let bs = msg.findExtBlock(Self.EXT_VERSIONS, hv, 3, 16, lo: origin, hi: end), msg.bitmapBit(bs, 0) else { return nil }
     return msg.readBool(bs + 12)
   }
   public func toOwned() -> User {
-    User(id: id, name: name, color: color, profile: profile.toOwned(), matrix: Array(matrix), nums: Array(nums), tags: Array(tags), blobs: Array(blobs), edges: edges.map { $0.toOwned() }, counts: counts.reduce(into: [String: UInt32]()) { $0[$1.0] = $1.1 }, byId: byId.reduce(into: [UInt64: Profile]()) { $0[$1.0] = $1.1.toOwned() }, avatar: avatar, motto: motto, stamp: stamp, ratio: ratio, flag: flag, small: small, wide: wide, offset: offset, preciseId: preciseId, email: email, score: score, tags2: Array(tags2), vip: vip)
+    User(id: id, name: name, color: color, profile: profile.toOwned(), matrix: Array(matrix), nums: Array(nums), tags: Array(tags), blobs: Array(blobs), edges: edges.map { $0.toOwned() }, points: points.map { $0.toOwned() }, counts: counts.reduce(into: [String: UInt32]()) { $0[$1.0] = $1.1 }, byId: byId.reduce(into: [UInt64: Profile]()) { $0[$1.0] = $1.1.toOwned() }, avatar: avatar, motto: motto, stamp: stamp, ratio: ratio, flag: flag, small: small, wide: wide, offset: offset, preciseId: preciseId, email: email, score: score, tags2: Array(tags2), vip: vip)
   }
 }
 public struct CountsMapView: Sequence {
   let msg: RawMessage
   let start: Int
-  public let count: Int
-  static let stride = 12
-  static let vOff = 8
+  let rawLen: UInt32
+  public var count: Int { Int(rawLen & LEN_MASK) }
+  var inst: Bool { rawLen & SHAPE_BIT != 0 }
+  var stride: Int { 12 }
+  var vOff: Int { 8 }
   public var isEmpty: Bool { count == 0 }
-  public func key(at i: Int) -> String { msg.readString(start + i * Self.stride) }
-  public func value(at i: Int) -> UInt32 { msg.readU32(start + i * Self.stride + Self.vOff) }
+  public func key(at i: Int) -> String { msg.readString(start + i * stride) }
+  public func value(at i: Int) -> UInt32 {
+    return msg.readU32(start + i * stride + vOff)
+  }
   public func entry(at i: Int) -> (String, UInt32) { (key(at: i), value(at: i)) }
   public struct Iterator: IteratorProtocol {
     let view: CountsMapView
@@ -575,12 +753,18 @@ public struct CountsMapView: Sequence {
 public struct ByIdMapView: Sequence {
   let msg: RawMessage
   let start: Int
-  public let count: Int
-  static let stride = 32
-  static let vOff = 8
+  let rawLen: UInt32
+  public var count: Int { Int(rawLen & LEN_MASK) }
+  var inst: Bool { rawLen & SHAPE_BIT != 0 }
+  var stride: Int { inst ? 16 : 32 }
+  var vOff: Int { inst ? 8 : 8 }
   public var isEmpty: Bool { count == 0 }
-  public func key(at i: Int) -> UInt64 { msg.readU64(start + i * Self.stride) }
-  public func value(at i: Int) -> ProfileReader { ProfileReader(msg: msg, origin: start + i * Self.stride + Self.vOff, hv: 0) }
+  public func key(at i: Int) -> UInt64 { msg.readU64(start + i * stride) }
+  public func value(at i: Int) -> ProfileReader {
+    let p = start + i * stride + vOff
+    if inst { let (o, l) = msg.readSlot(p); return ProfileReader(msg: msg, origin: Int(o), end: Int(o) + Int(l), hv: INSTANCE_HV) }
+    return ProfileReader(msg: msg, origin: p, end: msg.payloadCount, hv: 0)
+  }
   public func entry(at i: Int) -> (UInt64, ProfileReader) { (key(at: i), value(at: i)) }
   public struct Iterator: IteratorProtocol {
     let view: ByIdMapView
@@ -604,6 +788,7 @@ public struct User: Equatable {
   public var tags: [String]
   public var blobs: [Data]
   public var edges: [Node]
+  public var points: [Point]
   public var counts: [String: UInt32]
   public var byId: [UInt64: Profile]
   public var avatar: Data?
@@ -619,7 +804,7 @@ public struct User: Equatable {
   public var score: Double
   public var tags2: [String]
   public var vip: Bool?
-  public init(id: UInt64, name: String, color: Color, profile: Profile, matrix: [Float], nums: [Int32], tags: [String], blobs: [Data], edges: [Node], counts: [String: UInt32], byId: [UInt64: Profile], avatar: Data?, motto: String?, stamp: Int64, ratio: Double, flag: Bool, small: UInt8, wide: UInt16, offset: Int16, preciseId: UInt64, email: String?, score: Double, tags2: [String], vip: Bool?) {
+  public init(id: UInt64, name: String, color: Color, profile: Profile, matrix: [Float], nums: [Int32], tags: [String], blobs: [Data], edges: [Node], points: [Point], counts: [String: UInt32], byId: [UInt64: Profile], avatar: Data?, motto: String?, stamp: Int64, ratio: Double, flag: Bool, small: UInt8, wide: UInt16, offset: Int16, preciseId: UInt64, email: String?, score: Double, tags2: [String], vip: Bool?) {
     self.id = id
     self.name = name
     self.color = color
@@ -629,6 +814,7 @@ public struct User: Equatable {
     self.tags = tags
     self.blobs = blobs
     self.edges = edges
+    self.points = points
     self.counts = counts
     self.byId = byId
     self.avatar = avatar
@@ -650,9 +836,9 @@ func __writeUserBase(_ w: inout Writer, _ base: Int, _ value: User) {
   w.writeU64(base + 8, value.id)
   w.writeStringSlot(base + 16, value.name)
   w.writeI32(base + 24, value.color.rawValue)
-  __writeProfileBase(&w, base + 28, value.profile)
+  do { let s = __writeProfileInstance(&w, value.profile); w.writeSlot(base + 28, w.rel(s), w.length - s) }
   for (i0, v0) in value.matrix.prefix(4).enumerated() {
-    w.writeF32(base + 52 + i0 * 4, v0)
+    w.writeF32(base + 36 + i0 * 4, v0)
   }
   do {
     let a0 = value.nums
@@ -660,7 +846,7 @@ func __writeUserBase(_ w: inout Writer, _ base: Int, _ value: User) {
     for (i0, v0) in a0.enumerated() {
       w.writeI32(r0 + i0 * 4, v0)
     }
-    w.writeSlot(base + 68, w.rel(r0), a0.count)
+    w.writeSlot(base + 52, w.rel(r0), a0.count)
   }
   do {
     let a0 = value.tags
@@ -668,7 +854,7 @@ func __writeUserBase(_ w: inout Writer, _ base: Int, _ value: User) {
     for (i0, v0) in a0.enumerated() {
       w.writeStringSlot(r0 + i0 * 8, v0)
     }
-    w.writeSlot(base + 76, w.rel(r0), a0.count)
+    w.writeSlot(base + 60, w.rel(r0), a0.count)
   }
   do {
     let a0 = value.blobs
@@ -676,7 +862,7 @@ func __writeUserBase(_ w: inout Writer, _ base: Int, _ value: User) {
     for (i0, v0) in a0.enumerated() {
       w.writeDataSlot(r0 + i0 * 8, v0)
     }
-    w.writeSlot(base + 84, w.rel(r0), a0.count)
+    w.writeSlot(base + 68, w.rel(r0), a0.count)
   }
   do {
     let a0 = value.edges
@@ -684,7 +870,15 @@ func __writeUserBase(_ w: inout Writer, _ base: Int, _ value: User) {
     for (i0, v0) in a0.enumerated() {
       __writeNodeBase(&w, r0 + i0 * 12, v0)
     }
-    w.writeSlot(base + 92, w.rel(r0), a0.count)
+    w.writeSlot(base + 76, w.rel(r0), a0.count)
+  }
+  do {
+    let a0 = value.points
+    let r0 = w.reserve(a0.count * 8)
+    for (i0, v0) in a0.enumerated() {
+      __writePointBase(&w, r0 + i0 * 8, v0)
+    }
+    w.writeSlot(base + 84, w.rel(r0), a0.count)
   }
   do {
     let o = value.counts
@@ -695,34 +889,67 @@ func __writeUserBase(_ w: inout Writer, _ base: Int, _ value: User) {
       w.writeStringSlot(e, k)
       w.writeU32(e + 8, o[k]!)
     }
-    w.writeSlot(base + 100, w.rel(r), ks.count)
+    w.writeSlot(base + 92, w.rel(r), ks.count)
   }
   do {
     let o = value.byId
     let ks = o.keys.sorted()
-    let r = w.reserve(ks.count * 32)
+    let r = w.reserve(ks.count * 16)
     for (i, k) in ks.enumerated() {
-      let e = r + i * 32
+      let e = r + i * 16
       w.writeU64(e, k)
-      __writeProfileBase(&w, e + 8, o[k]!)
+      do { let s = __writeProfileInstance(&w, o[k]!); w.writeSlot(e + 8, w.rel(s), w.length - s) }
     }
-    w.writeSlot(base + 108, w.rel(r), ks.count)
+    w.writeSlot(base + 100, w.rel(r), Int(UInt32(ks.count) | SHAPE_BIT))
   }
   if let v = value.avatar {
     w.setBit(base, 0)
-    w.writeDataSlot(base + 116, v)
+    w.writeDataSlot(base + 108, v)
   }
   if let v = value.motto {
     w.setBit(base, 1)
-    w.writeStringSlot(base + 124, v)
+    w.writeStringSlot(base + 116, v)
   }
-  w.writeI64(base + 136, value.stamp)
-  w.writeF64(base + 144, value.ratio)
-  w.writeBool(base + 152, value.flag)
-  w.writeU8(base + 153, value.small)
-  w.writeU16(base + 154, value.wide)
-  w.writeU16(base + 156, UInt16(bitPattern: value.offset))
-  w.writeU64(base + 160, value.preciseId)
+  w.writeI64(base + 128, value.stamp)
+  w.writeF64(base + 136, value.ratio)
+  w.writeBool(base + 144, value.flag)
+  w.writeU8(base + 145, value.small)
+  w.writeU16(base + 146, value.wide)
+  w.writeU16(base + 148, UInt16(bitPattern: value.offset))
+  w.writeU64(base + 152, value.preciseId)
+}
+func __writeUserExt(_ w: inout Writer, _ value: User) {
+  do {
+    let blk = w.reserve(24)
+    if let v = value.email {
+      w.setBit(blk, 0)
+      w.writeStringSlot(blk + 4, v)
+    }
+    w.writeF64(blk + 16, value.score)
+    w.writeTrailer(blk, 2)
+  }
+  do {
+    let blk = w.reserve(16)
+    do {
+      let a0 = value.tags2
+      let r0 = w.reserve(a0.count * 8)
+      for (i0, v0) in a0.enumerated() {
+        w.writeStringSlot(r0 + i0 * 8, v0)
+      }
+      w.writeSlot(blk + 4, w.rel(r0), a0.count)
+    }
+    if let v = value.vip {
+      w.setBit(blk, 0)
+      w.writeBool(blk + 12, v)
+    }
+    w.writeTrailer(blk, 3)
+  }
+}
+func __writeUserInstance(_ w: inout Writer, _ value: User) -> Int {
+  let s = w.reserve(160)
+  __writeUserBase(&w, s, value)
+  __writeUserExt(&w, value)
+  return s
 }
 func __validateUserBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
   try nest("name") {
@@ -732,15 +959,16 @@ func __validateUserBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
     try checkEnum(Color.self, m, base + 24)
   }
   try nest("profile") {
-    try __validateProfileBase(m, base + 28, hv)
+    let (lo, hi) = try checkInstance(m, base + 28)
+    try __validateProfileInst(m, lo, hi)
   }
   do {
   }
   do {
-    try checkRegion(m, base + 68, 4, "nums")
+    try checkRegion(m, base + 52, 4, "nums")
   }
   do {
-    let (o0, n0) = try checkRegion(m, base + 76, 8, "tags")
+    let (o0, n0) = try checkRegion(m, base + 60, 8, "tags")
     for i0 in 0..<n0 {
       try nest("tags", i0) {
         try checkStrSlot(m, o0 + i0 * 8)
@@ -748,7 +976,7 @@ func __validateUserBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
     }
   }
   do {
-    let (o0, n0) = try checkRegion(m, base + 84, 8, "blobs")
+    let (o0, n0) = try checkRegion(m, base + 68, 8, "blobs")
     for i0 in 0..<n0 {
       try nest("blobs", i0) {
         try checkBytesSlot(m, o0 + i0 * 8)
@@ -756,15 +984,43 @@ func __validateUserBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
     }
   }
   do {
-    let (o0, n0) = try checkRegion(m, base + 92, 12, "edges")
-    for i0 in 0..<n0 {
-      try nest("edges", i0) {
-        try __validateNodeBase(m, o0 + i0 * 12, hv)
+    let (o0, n0, s0) = try checkRegionShape(m, base + 76, "edges")
+    if s0 {
+      for i0 in 0..<n0 {
+        try nest("edges", i0) {
+          let (lo, hi) = try checkInstance(m, o0 + i0 * 8)
+          try __validateNodeInst(m, lo, hi)
+        }
+      }
+    } else {
+      try checkExtent(m, o0, n0, 12, "edges")
+      for i0 in 0..<n0 {
+        try nest("edges", i0) {
+          try __validateNodeBase(m, o0 + i0 * 12, 0)
+        }
       }
     }
   }
   do {
-    let (o0, n0) = try checkRegion(m, base + 100, 12, "counts")
+    let (o0, n0, s0) = try checkRegionShape(m, base + 84, "points")
+    if s0 {
+      for i0 in 0..<n0 {
+        try nest("points", i0) {
+          let (lo, hi) = try checkInstance(m, o0 + i0 * 8)
+          try __validatePointInst(m, lo, hi)
+        }
+      }
+    } else {
+      try checkExtent(m, o0, n0, 8, "points")
+      for i0 in 0..<n0 {
+        try nest("points", i0) {
+          try __validatePointBase(m, o0 + i0 * 8, 0)
+        }
+      }
+    }
+  }
+  do {
+    let (o0, n0) = try checkRegion(m, base + 92, 12, "counts")
     for i0 in 0..<n0 {
       let e = o0 + i0 * 12
       try nest("counts", i0) {
@@ -773,22 +1029,32 @@ func __validateUserBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
     }
   }
   do {
-    let (o0, n0) = try checkRegion(m, base + 108, 32, "byId")
+    let (o0, n0, s0) = try checkRegionShape(m, base + 100, "byId")
+    let st = s0 ? 16 : 32
+    let vo = s0 ? 8 : 8
+    try checkExtent(m, o0, n0, st, "byId")
     for i0 in 0..<n0 {
-      let e = o0 + i0 * 32
-      try nest("byId", i0) {
-        try __validateProfileBase(m, e + 8, hv)
+      let e = o0 + i0 * st
+      if s0 {
+        try nest("byId", i0) {
+          let (lo, hi) = try checkInstance(m, e + vo)
+          try __validateProfileInst(m, lo, hi)
+        }
+      } else {
+        try nest("byId", i0) {
+          try __validateProfileBase(m, e + vo, 0)
+        }
       }
     }
   }
   if m.bitmapBit(base, 0) {
     try nest("avatar") {
-      try checkBytesSlot(m, base + 116)
+      try checkBytesSlot(m, base + 108)
     }
   }
   if m.bitmapBit(base, 1) {
     try nest("motto") {
-      try checkStrSlot(m, base + 124)
+      try checkStrSlot(m, base + 116)
     }
   }
 }
@@ -808,6 +1074,11 @@ func __validateUserV3(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {
       }
     }
   }
+}
+func __validateUserInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
+  try __validateUserBase(m, lo, INSTANCE_HV)
+  if let bs = m.findExtBlock(UserReader.EXT_VERSIONS, INSTANCE_HV, 3, 16, lo: lo, hi: hi) { try __validateUserV3(m, bs, INSTANCE_HV) }
+  if let bs = m.findExtBlock(UserReader.EXT_VERSIONS, INSTANCE_HV, 2, 24, lo: lo, hi: hi) { try __validateUserV2(m, bs, INSTANCE_HV) }
 }
 extension User {
   public static func decode(_ data: Data) -> UserReader? {
@@ -838,37 +1109,13 @@ extension User {
   }
   /// Canonical encoding (byte-identical to Rust and TS): declaration-order var data, sorted map keys.
   public func encode() -> Data {
-    var w = Writer(capacity: 176)
+    var w = Writer(capacity: 168)
     w.reserve(8)
-    let base = w.reserve(168)
+    let base = w.reserve(160)
     __writeUserBase(&w, base, self)
-    do {
-      let blk = w.reserve(24)
-      if let v = self.email {
-        w.setBit(blk, 0)
-        w.writeStringSlot(blk + 4, v)
-      }
-      w.writeF64(blk + 16, self.score)
-      w.writeTrailer(blk, 2)
-    }
-    do {
-      let blk = w.reserve(16)
-      do {
-        let a0 = self.tags2
-        let r0 = w.reserve(a0.count * 8)
-        for (i0, v0) in a0.enumerated() {
-          w.writeStringSlot(r0 + i0 * 8, v0)
-        }
-        w.writeSlot(blk + 4, w.rel(r0), a0.count)
-      }
-      if let v = self.vip {
-        w.setBit(blk, 0)
-        w.writeBool(blk + 12, v)
-      }
-      w.writeTrailer(blk, 3)
-    }
+    __writeUserExt(&w, self)
     w.writeU32(0, 1)
-    w.writeU16(4, 168)
+    w.writeU16(4, 160)
     w.writeU8(6, 3)
     w.writeU8(7, 0)
     return w.finish()

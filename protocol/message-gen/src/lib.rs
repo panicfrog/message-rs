@@ -223,6 +223,8 @@ pub fn ir_dump(key: Option<u32>) -> Result<Option<String>, String> {
 /// stay identical field by field; new fields must declare a strictly larger since; deletion and
 /// reordering are rejected. Marking an existing field `reserved` is the sanctioned way to delete
 /// it and passes; un-reserving one or flipping `precise` (number <-> bigint on the TS side) does not.
+/// Array strides and map entry layouts must not change either, except a map whose value struct
+/// gains its first extension block (writers then switch to instance entries; see SPEC §7).
 pub fn check_evolution(old: &SchemaSet, new: &SchemaSet) -> Vec<String> {
     let mut errs = Vec::new();
     for om in &old.messages {
@@ -300,6 +302,13 @@ pub fn check_evolution(old: &SchemaSet, new: &SchemaSet) -> Vec<String> {
                     "`{}`.`{}`: reserved field was un-reserved (a reserved field is deleted from the API; add a new field with a larger `since` instead)",
                     om.name, of.name
                 ));
+            } else if (nf.element_size, nf.map_value_offset) != (of.element_size, of.map_value_offset)
+                && !is_value_struct_first_evolution(of, nf, old, new)
+            {
+                errs.push(format!(
+                    "`{}`.`{}`: elementSize/mapValueOffset changed ({:?}/{:?} -> {:?}/{:?})",
+                    om.name, of.name, of.element_size, of.map_value_offset, nf.element_size, nf.map_value_offset
+                ));
             }
         }
         let old_max = om.fields.iter().map(|f| f.since).max().unwrap_or(1);
@@ -322,4 +331,27 @@ pub fn check_evolution(old: &SchemaSet, new: &SchemaSet) -> Vec<String> {
         }
     }
     errs
+}
+
+/// The one legal reason for a map field's entry layout to change: its value struct gained its
+/// first extension block, so today's writers emit instance entries (value = slot, shape bit set)
+/// instead of open ones. Readers pick the layout from each buffer's shape bit, so buffers written
+/// either way stay readable; array strides never change (they are the frozen fixed region).
+fn is_value_struct_first_evolution(
+    of: &message_core::FieldDescriptor,
+    nf: &message_core::FieldDescriptor,
+    old: &SchemaSet,
+    new: &SchemaSet,
+) -> bool {
+    let message_core::Type::Map { body } = &of.ty else { return false };
+    let message_core::Type::Struct { name } = body.value.as_ref() else { return false };
+    let was_flat = old.message(name).is_some_and(|m| m.layout.ext_blocks.is_empty());
+    let is_evolved = new.message(name).is_some_and(|m| !m.layout.ext_blocks.is_empty());
+    if !was_flat || !is_evolved {
+        return false;
+    }
+    match message_core::map_entry_layouts(&body.key, &body.value, new) {
+        Ok(l) => nf.element_size == Some(l.inst_stride) && nf.map_value_offset == Some(l.inst_value_offset),
+        Err(_) => false,
+    }
 }

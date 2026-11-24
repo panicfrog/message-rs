@@ -39,8 +39,10 @@ Everything is little-endian. Alignment and layout never depend on the key.
 
 ## 3. Fixed region of a block
 
-Fields are placed at natural alignment, offsets are compile-time constants (`__Layout` in Rust,
-literal offsets in the generated TS).
+The fixed region holds only two kinds of things: fixed-size scalars (and enums) inline, and one
+8-byte slot for everything whose size is not known at compile time. Fields are placed at natural
+alignment, offsets are compile-time constants (`__Layout` in Rust, literal offsets in the
+generated TS / Swift / Kotlin).
 
 | Type | Size | Align |
 |---|---|---|
@@ -48,10 +50,14 @@ literal offsets in the generated TS).
 | `u16`, `i16` | 2 | 2 |
 | `u32`, `i32`, `f32`, enum | 4 | 4 |
 | `u64`, `i64`, `f64` | 8 | 8 |
-| `String`, `Vec<u8>`, dynamic array, map | 8 (slot) | 4 |
-| inline struct | its `FIXED_LEN` | its `MAX_ALIGN` |
-| fixed array `[T; N]` of inline-shaped `T` | `N * size(T)` | `align(T)` |
-| fixed array of slot-shaped `T` (e.g. `[String; N]`) | 8 (slot) | 4 |
+| fixed array `[T; N]` of scalars | `N * size(T)` | `align(T)` |
+| `String`, `Vec<u8>`, dynamic array, map, **struct** | 8 (slot) | 4 |
+| fixed array of any other `T` (strings, enums, structs, ...) | 8 (slot) | 4 |
+
+A struct field is never inlined: it is a slot referencing a self-contained instance (section 5),
+so the parent's layout never depends on the child's and reference cycles (`A` holds `B`, `B`
+holds `A`) are legal. Fixed arrays that are not pure scalars are encoded exactly like a dynamic
+array of length `N`.
 
 `bool` is one byte, `0` = false, anything else = true. Enums are `i32` (negative discriminants
 allowed). Floats are IEEE-754 bit patterns. `u64`/`i64` are plain numbers unless the field is
@@ -67,48 +73,73 @@ return `None` / `null` without touching the bytes.
 
 The fixed region ends at `cursor` rounded up to the block's max alignment (`max_align`).
 
-## 4. Var data and slots
+## 4. Slots and var data
 
-Slot-shaped values (`String`, `Vec<u8>`, dynamic arrays, maps, fixed arrays of slot-shaped
-elements) occupy one 8-byte slot in the fixed region:
+A slot is two little-endian u32s:
 
 ```
-offset u32 LE   payload-relative (from the start of the payload, after the header)
-len    u32 LE   bytes for string/bytes; element count for arrays; entry count for maps
+offset u32   payload-relative (from the start of the payload, after the header)
+len    u32   string/bytes: byte count; struct instance: byte count (whole instance)
+             array/map: [ shape:1 bit | count:31 bits ]
 ```
 
-Strings are UTF-8. Strings and bytes are raw byte ranges `[offset, offset + len)`.
+A slot points at one of four kinds of region in the var data:
+
+| Region | `len` | Contents |
+|---|---|---|
+| byte string (`String` UTF-8, `Vec<u8>`) | bytes | raw bytes `[offset, offset + len)` |
+| struct instance | bytes | `[ bitmap | fixed fields | own var data | ext v2 | ext v3 ... ]` (section 5) |
+| array | shape + count | `count` element footprints, or `count` instance slots |
+| map | shape + count | `count` entries `key + value`, sorted by key |
+
+### The shape bit
+
+The high bit of an array / map slot's `len` tells readers how the elements are laid out; the low
+31 bits are the element count. The writer sets it from a write-time fact, never from a
+declaration: the bit is 1 exactly when the elements (map values) are structs **whose schema has
+extension blocks** at the time of writing. Readers always handle both forms, so buffers written
+before and after a struct gained extension fields are equally readable.
+
+- shape = 0 (open): every element occupies its footprint (table below) back to back;
+- shape = 1 (instances): every element is an 8-byte slot pointing at a self-contained instance.
+
+The bit is never set for strings, bytes or instance slots. A count above `2^31 - 1` cannot occur
+(the payload is limited to 4 GiB by the u32 offsets).
 
 ### Arrays
 
-The slot points at the array's data region: the contiguous repetition of the element footprint.
+Element `i` lives at `region + i * stride`:
 
-| Element | Footprint (stride) |
+| Element | stride |
 |---|---|
 | scalar / enum | its width (enum: 4) |
 | `String`, `Vec<u8>`, nested dynamic array | 8 (a slot per element) |
-| inline struct | the struct's `FIXED_LEN` (bitmap and slots included) |
-| fixed array of inline-shaped `T` | `N * size(T)` (inlined) |
+| struct, shape = 0 | the struct's base `FIXED_LEN` (bitmap and slots included; its var data follows the region) |
+| struct, shape = 1 | 8 (an instance slot per element) |
 
-Element `i` lives at `region + i * stride`. Nested dynamic arrays (`Vec<Vec<T>>`) store a slot per
-element pointing at the inner region.
-
-Fixed arrays `[T; N]` with inline-shaped `T` are written inline in the fixed region (no slot);
-fixed arrays of slot-shaped `T` are encoded exactly like a dynamic array of length `N`.
+An open struct element only carries the base fields, so arrays of an unevolved struct
+(`Vec<Point>`) cost nothing beyond the element footprints. Nested dynamic arrays (`Vec<Vec<T>>`)
+store a slot per element pointing at the inner region.
 
 ### Maps
 
-The slot points at the entry region. An entry is `key inline + value`:
+An entry is `key inline + value`:
 
 ```
 key    at entry + 0           scalar: its width; enum: 4; String: one slot
-value  at entry + v_offset    v_offset = align_up(key_size, align(value))
-stride = align_up(v_offset + size(value), max(align(key), align(value)))
+value  at entry + v_offset
 ```
 
-The value uses the same rules as a field (inline scalar/struct, slot for string/bytes/dynamic
-array). Entries are sorted by key: scalars and strings by their natural order, enums by their
-`i32` value. This makes the encoding canonical (byte-identical across languages and runs).
+| Value | v_offset | stride |
+|---|---|---|
+| non-struct, or struct with shape = 0 (open) | `align_up(key_size, align(value))` | `align_up(v_offset + size(value), max(align(key), align(value)))` |
+| struct with shape = 1 (instances) | `align_up(key_size, 4)` | `align_up(v_offset + 8, max(align(key), 4))` |
+
+For an open struct value `size`/`align` are the struct's base `FIXED_LEN`/`MAX_ALIGN`. Both pairs
+are compile-time constants; readers pick one from the shape bit (`map_entry_layouts` in core).
+The IR records the pair today's writers use. Entries are sorted by key: scalars and strings by
+their natural order (strings by UTF-8 bytes), enums by their `i32` value. This makes the encoding
+canonical (byte-identical across languages and runs).
 
 Valid key types: fixed-size scalars, `String`, enums. Invalid: `Vec<u8>`, arrays, maps. Valid
 value types: everything a field can hold except maps and fixed arrays (V1).
@@ -116,20 +147,36 @@ value types: everything a field can hold except maps and fixed arrays (V1).
 ### Var data order
 
 Variable data is appended in declaration-order depth-first: base block first, then each
-extension block; within a block, fields in declaration order; nested data (array of structs,
-map values) immediately after the slot/entry that references it. Rust `encode` and the TS
-`encodeMessage` both follow it, which is what makes their output byte-identical. Readers do
-not rely on it.
+extension block; within a block, fields in declaration order; nested data immediately after
+the slot / region that references it: an array region is followed by its elements' data in
+element order (a complete instance per element in instance mode), a map region by each entry's
+key data and value data, a struct field by its complete instance. Every encoder (Rust, TS,
+Swift, Kotlin) follows it, which is what makes their output byte-identical. Readers do not rely
+on it.
 
-## 5. Versioned fields
+## 5. Versioned fields and struct instances
 
 `#[msg(since = N)]` with `N >= 2` puts the field into the extension block of version `N`. All
 fields with the same `since` share one block (and one bitmap). `since` must be in `1..=255`.
 
-A struct that has versioned fields cannot be referenced by other types in V1 (inline, array
-element or map value): an inlined child only contributes its base part, so nested evolution would
-silently drop data. The planner rejects it (`EvolvedStructInline`); evolve the containing
-message instead.
+Every struct can evolve, including structs referenced by other types: a referenced struct is
+always written as a **self-contained instance**, a headerless mini-message
+
+```
+[ bitmap | fixed fields | own var data | ext block v2 | ext block v3 ... ]
+```
+
+whose referencing slot's `len` covers the whole instance, extension chain included. Its
+extension blocks have exactly the top-level format (section 6) and are located by walking back
+from the instance end without crossing below its start. There is no version byte: an instance
+promises nothing, so a missing block simply means an older writer and its fields degrade to
+defaults. Top-level messages keep the header and the payload-tail chain.
+
+| Reader view | extent | extension lookup |
+|---|---|---|
+| top-level message | the payload | walk back from the payload end, header version is the promise |
+| struct field / instance-mode element or value | the instance `[lo, hi)` | walk back from `hi`, nothing promised |
+| open element / value (shape = 0) | — | none (only base fields exist) |
 
 ## 6. Extension blocks
 
@@ -139,25 +186,30 @@ message instead.
 ```
 
 `block_len` covers the whole block including the trailer, so the block occupies
-`[end - block_len, end)`. Blocks are appended in ascending version order after the base block.
+`[end - block_len, end)`. Blocks are appended in ascending version order after the base block
+(of the message, or of the instance).
 
-Readers locate a block by walking back from the payload end: read the trailer, step over every
+Readers locate a block by walking back from the region end: read the trailer, step over every
 block newer than the one they are looking for (whether or not this reader knows that version),
-stop when `since` equals the target. A block is *absent* when the chain is broken or when the
-block is shorter than its fixed region. `version` in the header is the writer's maximum; blocks
-with `since > version` are inconsistent and make the chain invalid.
+stop when `since` equals the target. A block is *absent* when the chain is broken, when a block
+would extend below the region start, or when the block is shorter than its fixed region. For
+top-level messages `version` in the header is the writer's maximum; blocks with
+`since > version` are inconsistent and make the chain invalid.
 
-Compatibility:
+Compatibility (top-level and nested alike):
 
 - old reader, new buffer: unknown newer blocks are stepped over, the reader's own blocks are
-  still found behind them, the rest is ignored;
+  still found behind them, the rest is ignored; a reader compiled before a struct evolved reads
+  its instances' base fields and ignores their chains, and reads instance-mode arrays / maps
+  through the shape bit;
 - new reader, old buffer: missing blocks degrade to defaults (`None` / `0` / `""` / empty views),
-  or throw for a required struct field written by an older schema.
+  or throw for a required struct field written by an older schema; open elements written before
+  a struct evolved read their base fields and report its newer fields as absent.
 
 ## 7. Evolution rules (append-only)
 
-The base block and every existing extension block of a published message are frozen. The
-`check` command compares the current schema against the committed snapshot and rejects:
+The base block and every existing extension block of a published message (or struct) are frozen.
+The `check` command compares the current schema against the committed snapshot and rejects:
 
 - removing a message, changing its key, or any change to the base layout;
 - changing, reordering, inserting or deleting an existing field (type, `optional`, `since`,
@@ -166,10 +218,17 @@ The base block and every existing extension block of a published message are fro
 - shrinking the extension block count or changing an existing block;
 - un-reserving a reserved field;
 - appending a field whose `since` does not exceed the current maximum;
+- changing an array stride or a map entry layout (`elementSize`, `mapValueOffset`), with one
+  exception: a map whose value struct gains its first extension block switches from the open
+  pair to the instance pair (section 4);
 - changing enum variants.
 
-Allowed: appending fields with a strictly larger `since`, adding messages or enums, and marking an
-existing field `#[msg(reserved)]`.
+Allowed: appending fields with a strictly larger `since` (to any message or struct), adding
+messages or enums, and marking an existing field `#[msg(reserved)]`.
+
+Deployment order for nested evolution: a struct's first extension block makes new writers emit
+instance-mode containers (shape bit set) for it. Readers built from the v2 format handle both
+shapes, but roll the regenerated readers out before the writers that set the bit.
 
 ### Reserved fields
 
@@ -178,28 +237,32 @@ still encoded from the Rust struct field, but:
 
 - no accessor is generated on the Rust `Reader`;
 - `to_owned()` returns `Default::default()` for it (the field type must implement `Default`);
-- the TS side emits no getter, no interface field and no `toUser()` entry, and encodes zeros;
+- the TS / Swift / Kotlin side emits no getter and no field, and encodes zeros;
 - `validate` ignores its bytes.
 
-Set the Rust field to its `Default` value when Rust and TS output must be byte-identical.
+Set the Rust field to its `Default` value when Rust and the other languages must be
+byte-identical.
 
 ## 8. Validation
 
 `decode` is lazy and only checks the header length and the key; reading a corrupt buffer can
-panic (Rust) or throw (TS). For untrusted input call `Xxx::validate(&buf)` (Rust) or
-`Xxx.validate(buf)` (TS) first. After `Ok` / `null`:
+panic (Rust) or throw (TS / Swift / Kotlin). For untrusted input call `Xxx::validate(&buf)`
+(Rust) or `Xxx.validate(buf)` first. After `Ok` / `null`:
 
 - the buffer is long enough, the key and `fixed_len` match the compiled schema;
-- every reachable slot (fields, array elements, map keys and values, nested structs) lies inside
-  the payload, including overflow-safe element-count arithmetic;
+- every reachable slot (fields, array elements, map keys and values, struct instances) lies
+  inside the payload, including overflow-safe element-count arithmetic under either shape;
 - every string is valid UTF-8;
 - every enum value is a known variant;
 - every extension block the header promises is present, well-formed and at least as long as its
-  fixed region.
+  fixed region;
+- every struct instance is checked within its own extent: its base fields, and the fields of
+  each extension block its chain offers (absent blocks are legal).
 
 Errors carry the path to the leaf: Rust `ValidationError::Nested { field, index }` renders as
 `` at `edges`[0]: at `children`[1]: invalid utf-8 ``; TS `ValidationError.path` is
-`['edges', 0, 'children', 1]`.
+`['edges', 0, 'children', 1]`; instance errors nest under the field that references them
+(`` at `profile`: at `bio`: invalid utf-8 ``).
 
 Validation guarantees safety, not canonical structure: it does not check var-data ordering or
 that slots point into their own block's var region.

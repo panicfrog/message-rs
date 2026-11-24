@@ -151,3 +151,61 @@ fn enum_variant_change_is_rejected() {
     let errs = check_evolution(&with_enum, &changed);
     assert!(errs.iter().any(|e| e.contains("variants changed")), "{errs:?}");
 }
+
+/// Holder with a struct field, struct array and struct-valued map; `Inner` optionally evolved.
+fn nested_set(inner_evolved: bool) -> SchemaSet {
+    let mut inner = vec![
+        FieldDescriptor::new("a", SimpleType::U32.into()),
+        FieldDescriptor::new("s", SimpleType::String.into()),
+    ];
+    if inner_evolved {
+        inner.push(FieldDescriptor::new("b", SimpleType::Bool.into()).optional().since(2));
+    }
+    let mut set = SchemaSet {
+        messages: vec![
+            MessageDescriptor::new(1, "Holder", vec![
+                FieldDescriptor::new("inner", Type::structure("Inner")),
+                FieldDescriptor::new("list", Type::vec(Type::structure("Inner"))),
+                FieldDescriptor::new("by_id", Type::map(SimpleType::U64.into(), Type::structure("Inner"))),
+            ]),
+            MessageDescriptor::new(2, "Inner", inner),
+        ],
+        enums: vec![],
+    };
+    plan_schema(&mut set).unwrap();
+    set
+}
+
+#[test]
+fn nested_struct_evolution_passes_and_flips_map_entries() {
+    let (old, new) = (nested_set(false), nested_set(true));
+    let errs = check_evolution(&old, &new);
+    assert!(errs.is_empty(), "evolving a referenced struct must pass: {errs:?}");
+    let by_id = |s: &SchemaSet| {
+        let f = s.message("Holder").unwrap().fields.iter().find(|f| f.name == "by_id").unwrap().clone();
+        (f.element_size, f.map_value_offset)
+    };
+    assert_eq!(by_id(&old), (Some(24), Some(8)), "open entries: u64 key + 12-byte fixed region");
+    assert_eq!(by_id(&new), (Some(16), Some(8)), "instance entries: u64 key + slot");
+}
+
+#[test]
+fn other_entry_layout_changes_are_rejected() {
+    // forge a stride change without the value struct gaining its first extension block
+    let old = nested_set(false);
+    let mut new = nested_set(false);
+    let f = new.messages[0].fields.iter_mut().find(|f| f.name == "by_id").unwrap();
+    f.element_size = Some(16);
+    let errs = check_evolution(&old, &new);
+    assert!(errs.iter().any(|e| e.contains("by_id") && e.contains("elementSize")), "{errs:?}");
+}
+
+#[test]
+fn array_stride_changes_are_rejected() {
+    let old = nested_set(true);
+    let mut new = nested_set(true);
+    let f = new.messages[0].fields.iter_mut().find(|f| f.name == "list").unwrap();
+    f.element_size = Some(8);
+    let errs = check_evolution(&old, &new);
+    assert!(errs.iter().any(|e| e.contains("list") && e.contains("elementSize")), "{errs:?}");
+}
