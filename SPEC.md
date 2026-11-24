@@ -12,6 +12,7 @@ this file wins.
 | Derive | `protocol/message-derive` | `#[derive(Message)]` / `#[derive(MessageEnum)]`: compile-time layout constants, `encode`, zero-copy `Reader`, `validate`, descriptor registration |
 | Gen | `protocol/message-gen` | `export` (JSON IR snapshot), `check` (evolution gate), `ts` (TypeScript backend) |
 | TS runtime | `runtime/ts` | Zero-dependency runtime (Hermes / Web / Node): read primitives, views, `Writer`, validation primitives. Schema-free |
+| Swift runtime | `runtime/swift` | `MessageRuntime` (SwiftPM, iOS / macOS / Linux): `RawMessage`, views, `Writer`, validation primitives. Schema-free |
 
 Every backend consumes the same IR (the derive-computed descriptor) at build time and emits code
 with literal offsets; the IR itself is not shipped to the runtime. The layout planner in core
@@ -227,3 +228,35 @@ entry order matches Rust. Array-valued maps materialize as `Record<string, T[]>`
 
 Validation paths use the camelCase field names (`['byId', 0, 'bio']`), mirroring the API rather
 than the Rust names.
+
+## 10. Swift API
+
+`runtime/swift` is a SwiftPM package: `MessageRuntime` is the hand-written runtime, and the
+generated `Schema.swift` (one per schema, produced by `export-schema -- swift <path>`) is compiled
+into the app target that depends on it. Like TypeScript, everything is generated with literal
+offsets and the runtime knows nothing about any schema.
+
+Types map to Swift idioms: `u64`/`i64` are `UInt64`/`Int64` (no `precise` distinction), floats
+are `Float`/`Double`, `Vec<u8>` is `Data`, maps are `[K: V]` (enum keys are `Hashable`), fixed
+arrays are `[T]`, enums are `enum Color: Int32, MessageEnum` with lowerCamelCase cases
+(`Red` -> `.red`, `HTTPServer` -> `.httpServer`). Field names are lowerCamelCase (`by_id` ->
+`byId`). Reserved fields are omitted entirely, as in TypeScript.
+
+Each message gets:
+
+- `struct Xxx: Equatable` with a public memberwise `init`, `func encode() -> Data`, and
+  `static decode(_:) -> XxxReader?`, `fromBytes(_:) -> Xxx?`, `validate(_:) -> ValidationError?`;
+- `struct XxxReader`: zero-copy view over a `RawMessage` (the bytes are copied once on decode
+  into memory the `RawMessage` owns; scalars are plain loads, strings and `Data` are created on
+  access, arrays and maps are lazy views conforming to `Sequence`);
+- per map field a `XxxMapView` with `count`, `key(at:)`, `value(at:)`, `entry(at:)`;
+- `toOwned()` on the reader builds the plain struct.
+
+`encode()` sorts map keys by wire value (`String` keys by UTF-8 bytes, enum keys by
+`rawValue`) so the output is byte-identical to Rust and TypeScript; `validate` behaves exactly
+like the Rust and TS validators (same checks, same path semantics) and traps are impossible after
+it returns `nil`. `ValidationError` is an `Equatable` indirect enum whose `description` reads
+like the Rust one (``at `byId`[0]: at `bio`: slot out of bounds (...)``).
+
+`String(validating:as:)` is used on macOS 15 / iOS 18 and later, with a lossy round-trip check
+on older systems.

@@ -21,6 +21,7 @@ jobs:
           cargo run -p message-fixtures --bin export-schema -- export vectors/message-snapshot.json
           cargo run -p message-fixtures --bin export-schema -- vectors vectors/user.json
           cargo run -p message-fixtures --bin export-schema -- ts runtime/ts/src/schema.ts
+          cargo run -p message-fixtures --bin export-schema -- swift runtime/swift/Sources/MessageFixtures/Schema.swift
           git diff --exit-code --stat
 
   typescript:
@@ -38,3 +39,12 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  swift:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: runtime/swift
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test

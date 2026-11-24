@@ -5,6 +5,7 @@
 //! - evolution gate: `cargo run -p playground --bin export-schema -- check playground-snapshot.json`
 //! - single-type debug: `cargo run -p playground --bin export-schema -- ir --key 100`
 //! - generate TS: `cargo run -p playground --bin export-schema -- ts /path/to/schema.ts`
+//! - generate Swift: `cargo run -p playground --bin export-schema -- swift /path/to/Schema.swift`
 //!
 //! Rules cheat sheet:
 //! - every type needs a unique non-zero key;

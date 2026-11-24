@@ -12,6 +12,7 @@ protocol/
   message-fixtures  test messages + cross-language conformance vectors
   playground        scratch schema for trying things out
 runtime/ts/         zero-dependency TS runtime + generated schema.ts
+runtime/swift/      SwiftPM package: MessageRuntime + generated Schema.swift + conformance tests
 vectors/            committed IR snapshot and conformance vectors (generated)
 ```
 
@@ -60,6 +61,7 @@ these. V1 limits are listed in the spec.
 cargo run -p message-fixtures --bin export-schema -- export vectors/message-snapshot.json  # JSON IR snapshot
 cargo run -p message-fixtures --bin export-schema -- check  vectors/message-snapshot.json  # evolution gate (CI)
 cargo run -p message-fixtures --bin export-schema -- ts    runtime/ts/src/schema.ts        # TypeScript schema
+cargo run -p message-fixtures --bin export-schema -- swift runtime/swift/Sources/MessageFixtures/Schema.swift
 cargo run -p message-fixtures --bin export-schema -- vectors vectors/user.json             # conformance vectors
 ```
 
@@ -85,12 +87,29 @@ const r = UserReader.decode(bytes!);       // zero-copy view
 const again = User.encode(u);              // byte-identical to Rust
 ```
 
+## Swift
+
+Add `runtime/swift` (package `message-rs`, product `MessageRuntime`) as a SwiftPM dependency and
+compile the generated `Schema.swift` into your target.
+
+```swift
+let user = User(id: 42, name: "山田", color: .green, /* ... */)
+let data = user.encode()                   // byte-identical to Rust and TS
+
+if User.validate(data) == nil {            // ValidationError? with a field path
+    let r = UserReader.decode(data)!       // zero-copy view: r.profile.bio, r.tags[1], r.byId.key(at: 0)
+    let copy = r.toOwned()                 // plain struct
+}
+```
+
 ## Development
 
 ```sh
 cargo test --workspace
 cd runtime/ts && npm install && npm run typecheck && npm test
+cd runtime/swift && swift test
 ```
 
-CI (`.github/workflows/ci.yml`) runs both, the evolution gate, and verifies that the generated
-artifacts (`vectors/*`, `runtime/ts/src/schema.ts`) are up to date.
+CI (`.github/workflows/ci.yml`) runs all three, the evolution gate, and verifies that the
+generated artifacts (`vectors/*`, `runtime/ts/src/schema.ts`,
+`runtime/swift/Sources/MessageFixtures/Schema.swift`) are up to date.
