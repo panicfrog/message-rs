@@ -629,6 +629,10 @@ fabric.properties
 # Rust 模板的 debug/ 为非锚定规则,避免误伤同名源码目录,收窄为 target 专属(上面已有 target/)
 !debug/
 !gen/
+# Kotlin: the Gradle wrapper jar of runtime/kotlin is tracked (*.jar is ignored above)
+!runtime/kotlin/gradle/wrapper/gradle-wrapper.jar
+# Kotlin 2.x build session state
+.kotlin/
 
 # Claude Code local state
 .claude/

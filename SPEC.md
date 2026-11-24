@@ -10,9 +10,10 @@ this file wins.
 |---|---|---|
 | Core | `protocol/message-core` | IR data model (`SchemaSet`, `MessageDescriptor`), pure layout planner, read primitives, validation primitives, trait contracts |
 | Derive | `protocol/message-derive` | `#[derive(Message)]` / `#[derive(MessageEnum)]`: compile-time layout constants, `encode`, zero-copy `Reader`, `validate`, descriptor registration |
-| Gen | `protocol/message-gen` | `export` (JSON IR snapshot), `check` (evolution gate), `ts` (TypeScript backend) |
+| Gen | `protocol/message-gen` | `export` (JSON IR snapshot), `check` (evolution gate), `ts` / `swift` / `kotlin` (language backends) |
 | TS runtime | `runtime/ts` | Zero-dependency runtime (Hermes / Web / Node): read primitives, views, `Writer`, validation primitives. Schema-free |
 | Swift runtime | `runtime/swift` | `MessageRuntime` (SwiftPM, iOS / macOS / Linux): `RawMessage`, views, `Writer`, validation primitives. Schema-free |
+| Kotlin runtime | `runtime/kotlin` | `message.rs` package (Gradle, JVM / Android): `RawMessage`, views, `Writer`, validation primitives. Schema-free |
 
 Every backend consumes the same IR (the derive-computed descriptor) at build time and emits code
 with literal offsets; the IR itself is not shipped to the runtime. The layout planner in core
@@ -260,3 +261,41 @@ like the Rust one (``at `byId`[0]: at `bio`: slot out of bounds (...)``).
 
 `String(validating:as:)` is used on macOS 15 / iOS 18 and later, with a lossy round-trip check
 on older systems.
+
+## 11. Kotlin API
+
+`runtime/kotlin` is a Gradle project: `message-runtime` is the hand-written runtime (package
+`message.rs`, zero dependencies, JVM / Android), and the generated `Schema.kt` (one per schema,
+produced by `export-schema -- kotlin <path> [--package <pkg>]`) is compiled into the app target
+that depends on it. Like TypeScript and Swift, everything is generated with literal offsets and
+the runtime knows nothing about any schema.
+
+Types map to Kotlin idioms: `u64`/`i64` are `ULong`/`Long` (unsigned types throughout; no
+`precise` distinction), floats are `Float`/`Double`, `Vec<u8>` is `ByteArray`, maps are
+`Map<K, V>` with typed keys, arrays are `List<T>` (nested lists for nested arrays), enums are
+`enum class Color(override val value: Int) : MessageEnum` with UPPER_SNAKE_CASE cases
+(`Red` -> `RED`, `HTTPServer` -> `HTTP_SERVER`). Field names are lowerCamelCase (`by_id` ->
+`byId`); soft keywords stay bare (`value`, `data`, `object` as a property is fine except for
+hard keywords, which are backticked). Reserved fields are omitted entirely, as in TypeScript
+and Swift.
+
+Each message gets:
+
+- `data class Xxx` with content `equals`/`hashCode` when it holds bytes (`ByteArray` compares by
+  content, also inside lists), `fun encode(): ByteArray`, and a companion with
+  `decode(_): XxxReader?`, `fromBytes(_): Xxx?`, `validate(_): ValidationError?`;
+- `class XxxReader(override val msg: RawMessage, override val origin: Int, override val hv: Int)`:
+  zero-copy view (the bytes are copied once on decode into memory the `RawMessage` owns; scalars
+  are plain `ByteBuffer` loads, strings and `ByteArray` are created on access, arrays are lazy
+  read-only `AbstractList` views, map views expose `key(i)`, `value(i)`, `entry(i)` and iterate
+  as `Map.Entry` lists);
+- per map field a `XxxMapView` with `size`, `key(i:)`, `value(i:)`, `entry(i:)`;
+- `toOwned()` on the reader builds the plain data class.
+
+`decode(bytes)` returns null only for a short buffer or a key mismatch; reading a corrupt buffer
+can throw (`IndexOutOfBoundsException` / `IllegalStateException`), so call `User.validate(bytes)`
+first on untrusted input. `encode()` sorts map keys by wire value (`String` keys by UTF-8 bytes,
+enum keys by `value`, scalars by their natural order) so the output is byte-identical to Rust,
+TypeScript and Swift; `ValidationError` is a sealed class whose `toString()` reads like the Rust
+one (``at `byId`[0]: at `bio`: slot out of bounds (...)``). Region checks use `Long` arithmetic
+so element-count overflow cannot wrap around.

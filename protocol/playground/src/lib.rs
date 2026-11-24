@@ -6,6 +6,7 @@
 //! - single-type debug: `cargo run -p playground --bin export-schema -- ir --key 100`
 //! - generate TS: `cargo run -p playground --bin export-schema -- ts /path/to/schema.ts`
 //! - generate Swift: `cargo run -p playground --bin export-schema -- swift /path/to/Schema.swift`
+//! - generate Kotlin: `cargo run -p playground --bin export-schema -- kotlin /path/to/Schema.kt [--package com.example]`
 //!
 //! Rules cheat sheet:
 //! - every type needs a unique non-zero key;

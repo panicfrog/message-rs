@@ -1,4 +1,4 @@
-// Fixtures export binary: forwards the generic message-gen commands (export/check/ir/ts)
+// Fixtures export binary: forwards the generic message-gen commands (export/check/ir/ts/swift/kotlin)
 // and additionally provides `vectors` to emit cross-language conformance vectors.
 
 fn main() {

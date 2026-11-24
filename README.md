@@ -8,11 +8,12 @@ output to Rust. The wire format is specified in [SPEC.md](SPEC.md).
 protocol/
   message-core      IR data model, layout planner, read/validate primitives, traits
   message-derive    #[derive(Message)] / #[derive(MessageEnum)]
-  message-gen       export / check / ts  (the export binary and evolution gate)
+  message-gen       export / check / ts / swift / kotlin  (the export binary and evolution gate)
   message-fixtures  test messages + cross-language conformance vectors
   playground        scratch schema for trying things out
 runtime/ts/         zero-dependency TS runtime + generated schema.ts
 runtime/swift/      SwiftPM package: MessageRuntime + generated Schema.swift + conformance tests
+runtime/kotlin/     Gradle project: message-runtime + generated Schema.kt + conformance tests
 vectors/            committed IR snapshot and conformance vectors (generated)
 ```
 
@@ -62,6 +63,7 @@ cargo run -p message-fixtures --bin export-schema -- export vectors/message-snap
 cargo run -p message-fixtures --bin export-schema -- check  vectors/message-snapshot.json  # evolution gate (CI)
 cargo run -p message-fixtures --bin export-schema -- ts    runtime/ts/src/schema.ts        # TypeScript schema
 cargo run -p message-fixtures --bin export-schema -- swift runtime/swift/Sources/MessageFixtures/Schema.swift
+cargo run -p message-fixtures --bin export-schema -- kotlin runtime/kotlin/.../Schema.kt [--package x.y.z]
 cargo run -p message-fixtures --bin export-schema -- vectors vectors/user.json             # conformance vectors
 ```
 
@@ -102,14 +104,31 @@ if User.validate(data) == nil {            // ValidationError? with a field path
 }
 ```
 
+## Kotlin
+
+Add `runtime/kotlin` (Gradle project `message-rs`, module `message-runtime`) as a dependency and
+compile the generated `Schema.kt` into your target (`--package` picks its package; the default
+is the runtime's own `message.rs`).
+
+```kotlin
+val user = User(id = 42uL, name = "山田", color = Color.GREEN, /* ... */)
+val data = user.encode()                   // byte-identical to Rust, TS and Swift
+
+if (User.validate(data) == null) {         // ValidationError? with a field path
+    val r = UserReader.decode(data)!!      // zero-copy view: r.profile.bio, r.tags[1], r.byId.key(0)
+    val copy = r.toOwned()                 // plain data class
+}
+```
+
 ## Development
 
 ```sh
 cargo test --workspace
 cd runtime/ts && npm install && npm run typecheck && npm test
 cd runtime/swift && swift test
+cd runtime/kotlin && ./gradlew test
 ```
 
-CI (`.github/workflows/ci.yml`) runs all three, the evolution gate, and verifies that the
+CI (`.github/workflows/ci.yml`) runs all four, the evolution gate, and verifies that the
 generated artifacts (`vectors/*`, `runtime/ts/src/schema.ts`,
-`runtime/swift/Sources/MessageFixtures/Schema.swift`) are up to date.
+`runtime/swift/Sources/MessageFixtures/Schema.swift`, `runtime/kotlin/**/Schema.kt`) are up to date.

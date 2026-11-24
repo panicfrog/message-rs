@@ -15,13 +15,16 @@
 //! - `ts <out.ts>`: generate the TypeScript schema (readers, encoders, validators with literal
 //!   offsets; the runtime needs no IR);
 //! - `swift <Schema.swift>`: same for Swift, on top of the `MessageRuntime` module;
+//! - `kotlin <Schema.kt> [--package <pkg>]`: same for Kotlin, on top of the `message.rs` runtime package;
 //! - `ir --key <KEY>`: dump the JSON IR of a single type for debugging.
 
 use message_core::{collect_schema, set_to_json_string, SchemaSet};
 use std::path::Path;
 
+mod backend_kotlin;
 mod backend_swift;
 mod backend_ts;
+pub use backend_kotlin::{generate_kotlin, RUNTIME_PACKAGE};
 pub use backend_swift::generate_swift;
 pub use backend_ts::generate_ts;
 
@@ -89,6 +92,28 @@ pub fn run(cmd: &str, args: &[String]) -> i32 {
                 }
             }
         }
+        "kotlin" => {
+            let path = args
+                .iter()
+                .find(|a| !a.starts_with("--"))
+                .map(|s| s.as_str())
+                .unwrap_or("Schema.kt");
+            let package = args
+                .iter()
+                .position(|a| a == "--package")
+                .and_then(|i| args.get(i + 1))
+                .map_or(RUNTIME_PACKAGE, String::as_str);
+            match kotlin_to(path, package) {
+                Ok(n) => {
+                    println!("generated Kotlin code ({n} message types) -> {path}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("Kotlin generation failed: {e}");
+                    1
+                }
+            }
+        }
         "check" => {
             let path = args.first().map(|s| s.as_str()).unwrap_or(DEFAULT_SNAPSHOT);
             match check_against(path) {
@@ -131,7 +156,7 @@ pub fn run(cmd: &str, args: &[String]) -> i32 {
             }
         }
         other => {
-            eprintln!("unknown command `{other}` (supported: export / check / ir --key <KEY> / ts <out.ts> / swift <Schema.swift>)");
+            eprintln!("unknown command `{other}` (supported: export / check / ir --key <KEY> / ts <out.ts> / swift <Schema.swift> / kotlin <Schema.kt> [--package <pkg>])");
             2
         }
     }
@@ -157,6 +182,14 @@ pub fn swift_to(path: &str) -> Result<usize, String> {
     let set = collect_schema().map_err(|e| e.to_string())?;
     let n = set.messages.len();
     std::fs::write(Path::new(path), generate_swift(&set)).map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
+/// Generate the Kotlin schema (same shape as the Swift one, on top of the `message.rs` runtime).
+pub fn kotlin_to(path: &str, package: &str) -> Result<usize, String> {
+    let set = collect_schema().map_err(|e| e.to_string())?;
+    let n = set.messages.len();
+    std::fs::write(Path::new(path), generate_kotlin(&set, package)).map_err(|e| e.to_string())?;
     Ok(n)
 }
 
