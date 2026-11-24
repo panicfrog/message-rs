@@ -226,9 +226,11 @@ The `check` command compares the current schema against the committed snapshot a
 Allowed: appending fields with a strictly larger `since` (to any message or struct), adding
 messages or enums, and marking an existing field `#[msg(reserved)]`.
 
-Deployment order for nested evolution: a struct's first extension block makes new writers emit
-instance-mode containers (shape bit set) for it. Readers built from the v2 format handle both
-shapes, but roll the regenerated readers out before the writers that set the bit.
+Deployment order for nested evolution (relevant once messages ship): a struct's first extension
+block makes new writers emit instance-mode containers (shape bit set) for it. Readers built from
+this format handle both shapes whichever schema they were compiled against, so in a homogeneous
+fleet the rollout order does not matter. Follow the readers-first order only while older-format
+builds may still be reading — and because only the regenerated readers expose the new fields.
 
 ### Reserved fields
 

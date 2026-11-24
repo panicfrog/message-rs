@@ -1,0 +1,8 @@
+[package]
+name = "message-hub"
+description = "In-process pub/sub data hub: subscription registry, fan-out and last-value pull"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
