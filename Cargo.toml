@@ -7,6 +7,7 @@ members = [
     "protocol/message-fixtures",
     "protocol/playground",
     "hub",
+    "hub/ffi",
 ]
 
 [workspace.package]

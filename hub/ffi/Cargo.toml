@@ -1,0 +1,17 @@
+[package]
+name = "hub-ffi"
+description = "cxx bridge exposing the message-hub core to Swift (and any C++ caller)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+message-hub = { path = "../" }
+cxx = "1"
+
+[build-dependencies]
+cxx-build = "1"
+
+[lib]
+name = "hub_ffi"
+crate-type = ["staticlib", "rlib"]

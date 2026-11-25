@@ -281,7 +281,14 @@ distribution can wait.
 
 - M1 is in place under `hub/` (`Cargo.toml`, `src/value.rs`, `src/lib.rs`, `tests/hub.rs`) and
   `hub` is a root workspace member; `cargo test -p message-hub` covers section 7 (21 tests).
-- The M2 spike (step 0) passed; its code was thrown away by design. Next: M2 step 1, the real
-  bridge in `hub/ffi/` (`message-hub` as a path dependency, cxx 1.0.205), following the
-  corrected shape in section 6.
+- The M2 spike (step 0) passed; its code was thrown away by design.
+- M2 step 1 is in place: `hub/ffi/` (crate `hub-ffi`, a workspace member) holds the bridge
+  (`src/bridge.rs`) and its ABI-level tests (`tests/bridge.rs`, 7 tests driving the bridge the
+  way Swift will: `extern "C"` trampolines, opaque addresses, a foreign job queue). Two
+  decisions made while writing it: the opaque handles are newtypes over the core's (cxx requires
+  opaque types to be defined in the bridge crate), and `publish` is infallible like the core —
+  the hub is payload-agnostic, so fixed-size kinds are validated when a value is decoded, not on
+  publish. The scheduler contract is `run` (borrowing the job) then `drop` exactly once.
+- Next: M2 step 2 (export the generated header into `hub/swift/`, the xcframework script, the
+  SwiftPM package) and step 3 (acceptance).
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.
