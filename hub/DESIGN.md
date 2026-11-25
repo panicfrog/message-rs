@@ -305,10 +305,13 @@ distribution can wait.
   (an `AsyncStream<HubEvent>` whose continuation is resumed from a relay queue — yielding
   straight from the hub's callback threads wakes the consumer unreliably), `HubObservable`
   (an `ObservableObject` mirror per id with `@Published` lastValue/lastBytes/isClosed and a
-  pull-first `refresh()`), and `subscribe(on: DispatchQueue)`. Two environment notes the
-  tests encode: this toolchain's Testing.framework crashes the process (signal 5) when a test
-  bundle exposes async XCTest entry points, so the async bodies run inside bounded detached
-  tasks; and Combine's `Published.sink` crashes the .xctest bundle too (SwiftUICore link is
-  refused), so mirror tests poll instead — real SwiftUI apps are unaffected.
+  pull-first `refresh()`), and `subscribe(on: DispatchQueue)`.
+- The tests are swift-testing (`@Test` suites, `#expect`), not XCTest — and that is load-bearing
+  here: on this toolchain an async XCTest entry point pulls the swift-testing runtime into an
+  XCTest-driven process, whose initialization crashes (signal 5); Combine's `Published.sink`
+  crashed under that regime too but works fine under swift-testing. Migrating the whole test
+  target removed every workaround (no bounded detached tasks, no polling instead of sinks).
+  A caveat learned the hard way: a `Test` that subscribes must create the stream before the
+  first publish — the hub is pure forwarding and never replays.
 - Next: M4 (`hub-jni` + Kotlin Flow wrapper), then M5 (`hub-turbo`).
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.
