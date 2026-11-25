@@ -1,8 +1,8 @@
 # Data Hub Design (数据管理层)
 
-Status: design agreed, M1 (Rust core) implemented; M2 planned as a cxx bridge behind a SwiftPM
-package, gated by a spike. Decisions below were settled in discussion on 2026-11-24; change
-them here first, then in code.
+Status: design agreed, M1 (Rust core) implemented; M2's spike passed on 2026-11-25 (cxx 1.0.205,
+Xcode 26.1.1, Swift 6.2.1) and its corrections are folded into section 6. Decisions below were
+settled in discussion on 2026-11-24; change them here first, then in code.
 
 ## 1. Role
 
@@ -178,32 +178,44 @@ impl Subscription {
   the Swift surface as a `cxx` bridge, on the toolchain jsi-rs already uses (`cxx` /
   `cxx-build` are in every jsi-turbo superlib, so this adds no dependency there; UniFFI stays
   ruled out). Plan, in order:
-  0. **Spike first** (one day, throwaway code, nothing kept), in SwiftPM form: a package with
-     a Clang target exposing a cxxbridge header and a Swift target with
-     `interoperabilityMode(.Cxx)` importing it; call a function with an opaque type, a `&[u8]`
-     argument and a `Vec<u8>` return; receive a callback through a `@_cdecl` function pointer
-     registered at call time; link the Rust static library from a `binaryTarget` xcframework
-     built by a script. Any step that does not hold turns M2 back to a hand-written C header —
-     the bridge shape below is the same either way.
+  0. **Spike — done, passed** (2026-11-25; throwaway, not in this tree). Every step held with
+     one correction and three findings that shape step 1:
+     - **cxx does not accept function pointers from C++ to Rust** ("not implemented yet"), so
+       the callback crosses as an opaque address (`*const u8`, transmuted back on the Rust
+       side) — the same representation on every ABI we target. There is no `extern "C"` block
+       in a bridge either; C fn types are written inline as `unsafe extern "C" fn(...)`.
+     - **Swift cannot construct `rust::Slice`** (its raw-pointer constructor is not imported), so
+       `&[u8]` arguments cross as `(ptr: *const u8, len: usize)`; `Vec<u8>` returns are fine
+       (Swift imports `size()` and the subscript, not `data()`/`begin()`).
+     - Opaque Rust types are imported as a bare `OpaquePointer` (the `namespace.Type` spelling
+       does not exist in Swift); functions taking raw pointers must be `unsafe fn` in cxx
+       1.0.205; `extern "Rust"` items are implemented in the bridge module's parent.
+     - The test target needs `interoperabilityMode(.Cxx)` too (SwiftPM rebuilds the Clang module
+       for it, otherwise as Objective-C), and `cxxLanguageStandard: .cxx17` is a `Package(...)`
+       argument. SwiftPM caches a `binaryTarget` by path: the build script must remove the old
+       xcframework before writing the new one.
   1. **The bridge** (`hub/ffi/src/bridge.rs`, `#[cxx::bridge(namespace = "message_hub")]`):
      opaque `Hub`, `Publisher`, `Subscription`; handles are raw pointers (`*mut T`), so Swift
      never meets a move-only `unique_ptr` — RAII lives in the Swift wrapper's `deinit`.
      `shared() -> &'static Hub`, `create()` for isolated tests, `release`; `publisher(h, id,
-     kind_u8)`, `publish(p, bytes: &[u8])`, `close(p)` / `release(p)`; `subscribe(h, id,
-     trampoline, ctx)` and `subscribe_on(h, id, trampoline, ctx, schedule, schedule_ctx)`, the
-     trampolines declared in a nested `extern "C"` block (Swift exports them with `@_cdecl`), a
-     reserved `kind_u8` delivering `Closed` as `ptr = null, len = 0`; `unsubscribe(s)` /
-     `release(s)`; `get(h, id) -> Vec<u8>`, empty meaning `None`. Every function is infallible —
-     no `Result`, so no C++ exception ever crosses a Swift frame.
-  2. **Build and packaging**: `hub/ffi/build.rs` runs `cxx-build`, so cargo compiles the glue
-     and `cargo test` covers the bridge. The generated header and the `cxx` runtime headers are
+     kind_u8)`, `publish(p, ptr: *const u8, len: usize)`, `close(p)` / `release(p)`;
+     `subscribe(h, id, cb: *const u8, ctx: *mut u8)` and `subscribe_on(h, id, cb, ctx, schedule:
+     *const u8, schedule_ctx: *mut u8)`. The Swift side passes a `@convention(c)` closure cast to
+     a pointer (the trampoline) plus a retained context box, and exports the trampoline as a
+     file-private static so it is never a capturing closure. A reserved `kind_u8` (255) delivers
+     `Closed` as `ptr = null, len = 0`. `unsubscribe(s)` / `release(s)`; `get(h, id) -> Vec<u8>`,
+     empty meaning `None`. Every function is infallible — no `Result`, so no C++ exception ever
+     crosses a Swift frame.
+  2. **Build and packaging**: `hub/ffi/build.rs` runs `cxx-build` (`cargo test` compiles the
+     glue and covers the bridge). The generated header and the `cxx` runtime headers are
      exported into `hub/swift/Sources/MessageHubCxx/include/` and committed, like every other
-     generated artifact here, with a CI freshness check. The package has three targets:
+     generated artifact here, with a CI freshness check. The package has four targets:
      `MessageHubCxx` (Clang, headers only — SwiftPM writes its module map), `MessageHubRust`
-     (`binaryTarget`: an xcframework holding `libhub_ffi.a` with the core inside, device and
-     simulator slices, built by `hub/swift/scripts/build-xcframework.sh`, gitignored) and
-     `MessageHub` (Swift with C++ interop, depending on both). C++ interop is switched on only
-     for `MessageHub`; the product apps see is pure Swift.
+     (`binaryTarget`: an xcframework holding `libhub_ffi.a` with the core inside, device,
+     simulator and macOS slices, built by `hub/swift/scripts/build-xcframework.sh`, gitignored),
+     `MessageHub` (Swift with C++ interop, depending on both) and `MessageHubTests` (also with
+     C++ interop). C++ interop is switched on only for the two Swift targets; the product apps
+     see is pure Swift.
   3. **Acceptance**: a C++ round-trip test (`hub/ffi/tests/roundtrip.cpp`, compiled by the test
      build against the bridge) covering publish / subscribe / `get` / `Closed` / close; the
      package's Swift tests decode a message vector published from Rust via `Schema.swift`.
@@ -269,6 +281,7 @@ distribution can wait.
 
 - M1 is in place under `hub/` (`Cargo.toml`, `src/value.rs`, `src/lib.rs`, `tests/hub.rs`) and
   `hub` is a root workspace member; `cargo test -p message-hub` covers section 7 (21 tests).
-  No M2 code exists yet: start at M2 step 0, the spike, in SwiftPM form, and keep it out of
-  this tree until it has passed.
+- The M2 spike (step 0) passed; its code was thrown away by design. Next: M2 step 1, the real
+  bridge in `hub/ffi/` (`message-hub` as a path dependency, cxx 1.0.205), following the
+  corrected shape in section 6.
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.
