@@ -289,6 +289,18 @@ distribution can wait.
   opaque types to be defined in the bridge crate), and `publish` is infallible like the core —
   the hub is payload-agnostic, so fixed-size kinds are validated when a value is decoded, not on
   publish. The scheduler contract is `run` (borrowing the job) then `drop` exactly once.
-- Next: M2 step 2 (export the generated header into `hub/swift/`, the xcframework script, the
-  SwiftPM package) and step 3 (acceptance).
+- M2 steps 2 and 3 are in place: `hub/swift/` is the SwiftPM package (`MessageHubCxx` headers,
+  `MessageHubRust` binaryTarget xcframework with iOS + simulator + macOS slices, `MessageHub`
+  Swift wrapper with C++ interop, tests with it too). `export-headers.sh` copies the generated
+  bridge header in; `scripts/build-xcframework.sh` builds the slices (it removes the old
+  xcframework first — SwiftPM caches a binaryTarget by path). The Swift surface is `Hub`
+  (`.shared` or isolated), `Publisher` and `Subscription`, `subscribe(on:)` mapping onto any
+  dispatching closure, `Value`/`ValueKind` mirroring the core codec. `swift test` (6 tests)
+  covers push/pull/Closed/scheduler and a byte-for-byte check of a Rust message vector through
+  the hub. One more Swift interop finding, beyond the spike's: functions taking C++ references
+  (`const T&`) are **not imported at all** — the bridge therefore takes every handle as a raw
+  pointer, and `shared_ptr()` is the pointer-returning variant of `shared()`. Opaque types stay
+  invisible in Swift: handles are `OpaquePointer` end to end.
+- Next: M3 (Observable-style surface: AsyncSequence of events, an ObservableObject mirror per
+  id, `subscribe(on:)` onto DispatchQueue/@MainActor), then M4 (Kotlin/JNI).
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.

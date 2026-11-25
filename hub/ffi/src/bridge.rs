@@ -17,27 +17,28 @@ pub mod ffi {
         /// RAII subscription handle.
         type Subscription;
 
-        fn shared() -> &'static Hub;
+        /// Pointer-returning variant for Swift (reference returns are not imported there).
+        unsafe fn shared_ptr() -> *const Hub;
         fn create() -> *mut Hub;
         unsafe fn release_hub(h: *mut Hub);
 
         /// Invalid kinds yield null: the caller keeps a stable failure mode instead of a panic.
-        unsafe fn publisher(h: &Hub, id: u32, kind_u8: u8) -> *mut Publisher;
-        unsafe fn publisher_id(p: &Publisher) -> u32;
-        unsafe fn publisher_kind(p: &Publisher) -> u8;
+        unsafe fn publisher(h: *const Hub, id: u32, kind_u8: u8) -> *mut Publisher;
+        unsafe fn publisher_id(p: *const Publisher) -> u32;
+        unsafe fn publisher_kind(p: *const Publisher) -> u8;
         /// A no-op after `close`. Payload length is not checked here: the hub is payload-agnostic,
         /// fixed-size kinds are validated when a value is decoded.
-        unsafe fn publish(p: &Publisher, ptr: *const u8, len: usize);
-        unsafe fn close(p: &Publisher);
+        unsafe fn publish(p: *const Publisher, ptr: *const u8, len: usize);
+        unsafe fn close(p: *const Publisher);
         unsafe fn release_publisher(p: *mut Publisher);
 
         /// `Closed` is delivered as `ptr = null, len = 0` (see `CLOSED_KIND`). `ctx_drop` frees
         /// `ctx` once nothing references it any more (not at `unsubscribe`: a scheduled job may
         /// still be pending).
-        unsafe fn subscribe(h: &Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8) -> *mut Subscription;
+        unsafe fn subscribe(h: *const Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8) -> *mut Subscription;
         /// Like `subscribe`, but each delivery is handed to `schedule` as a job.
         unsafe fn subscribe_on(
-            h: &Hub,
+            h: *const Hub,
             id: u32,
             cb: *const u8,
             ctx: *mut u8,
@@ -45,13 +46,13 @@ pub mod ffi {
             schedule: *const u8,
             schedule_ctx: *mut u8,
         ) -> *mut Subscription;
-        unsafe fn subscription_id(s: &Subscription) -> u32;
-        unsafe fn unsubscribe(s: &Subscription);
+        unsafe fn subscription_id(s: *const Subscription) -> u32;
+        unsafe fn unsubscribe(s: *const Subscription);
         unsafe fn release_subscription(s: *mut Subscription);
 
         /// The newest value of `id` as `(kind, bytes)`; empty bytes mean "nothing published".
         /// `kind` is written through the out pointer only when a value is returned.
-        unsafe fn get(h: &Hub, id: u32, kind_out: &mut u8) -> Vec<u8>;
+        unsafe fn get(h: *const Hub, id: u32, kind_out: *mut u8) -> Vec<u8>;
     }
 }
 
@@ -147,7 +148,7 @@ fn make_callback(sub: Arc<ForeignSub>) -> Callback {
     })
 }
 
-fn register(h: &Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8, schedule: Option<(*const u8, *mut u8)>) -> *mut Subscription {
+fn register(h: *const Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8, schedule: Option<(*const u8, *mut u8)>) -> *mut Subscription {
     // Invalid addresses are a programming error on the caller's side; keep the failure local
     // instead of transmuting garbage into a function pointer.
     assert!(!cb.is_null() && !ctx_drop.is_null(), "subscribe needs a callback and a ctx drop fn");
@@ -164,7 +165,8 @@ fn register(h: &Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8, 
     let callback = make_callback(Arc::clone(&sub));
     // Scheduled deliveries never run on the publisher's thread, so the hub's own scheduler
     // hook is not needed: the callback hands the job over itself.
-    let subscription = h.0.subscribe(id, callback);
+    // SAFETY: the caller handed us a valid hub reference across the bridge.
+    let subscription = unsafe { (*h).0.subscribe(id, callback) };
     Box::into_raw(Box::new(Subscription(subscription))) as *mut Subscription
 }
 
@@ -173,6 +175,10 @@ fn register(h: &Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8, 
 pub fn shared() -> &'static Hub {
     static SHARED: std::sync::OnceLock<Hub> = std::sync::OnceLock::new();
     SHARED.get_or_init(|| Hub(message_hub::Hub::shared().clone()))
+}
+
+pub unsafe fn shared_ptr() -> *const Hub {
+    shared() as *const Hub
 }
 
 pub fn create() -> *mut Hub {
@@ -185,28 +191,28 @@ pub unsafe fn release_hub(h: *mut Hub) {
     }
 }
 
-pub unsafe fn publisher(h: &Hub, id: u32, kind_u8: u8) -> *mut Publisher {
+pub unsafe fn publisher(h: *const Hub, id: u32, kind_u8: u8) -> *mut Publisher {
     match message_hub::ValueKind::from_u8(kind_u8) {
-        Some(kind) => Box::into_raw(Box::new(Publisher(h.0.publisher(id, kind)))),
+        Some(kind) => Box::into_raw(Box::new(Publisher((*h).0.publisher(id, kind)))),
         None => std::ptr::null_mut(),
     }
 }
 
-pub unsafe fn publisher_id(p: &Publisher) -> u32 {
-    p.0.id()
+pub unsafe fn publisher_id(p: *const Publisher) -> u32 {
+    (*p).0.id()
 }
 
-pub unsafe fn publisher_kind(p: &Publisher) -> u8 {
-    p.0.kind() as u8
+pub unsafe fn publisher_kind(p: *const Publisher) -> u8 {
+    (*p).0.kind() as u8
 }
 
-pub unsafe fn publish(p: &Publisher, ptr: *const u8, len: usize) {
+pub unsafe fn publish(p: *const Publisher, ptr: *const u8, len: usize) {
     let bytes: &[u8] = if len == 0 { &[] } else { std::slice::from_raw_parts(ptr, len) };
-    p.0.publish(bytes);
+    (*p).0.publish(bytes);
 }
 
-pub unsafe fn close(p: &Publisher) {
-    p.0.close();
+pub unsafe fn close(p: *const Publisher) {
+    (*p).0.close();
 }
 
 pub unsafe fn release_publisher(p: *mut Publisher) {
@@ -215,12 +221,12 @@ pub unsafe fn release_publisher(p: *mut Publisher) {
     }
 }
 
-pub unsafe fn subscribe(h: &Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8) -> *mut Subscription {
+pub unsafe fn subscribe(h: *const Hub, id: u32, cb: *const u8, ctx: *mut u8, ctx_drop: *const u8) -> *mut Subscription {
     register(h, id, cb, ctx, ctx_drop, None)
 }
 
 pub unsafe fn subscribe_on(
-    h: &Hub,
+    h: *const Hub,
     id: u32,
     cb: *const u8,
     ctx: *mut u8,
@@ -231,12 +237,12 @@ pub unsafe fn subscribe_on(
     register(h, id, cb, ctx, ctx_drop, Some((schedule, schedule_ctx)))
 }
 
-pub unsafe fn subscription_id(s: &Subscription) -> u32 {
-    s.0.id()
+pub unsafe fn subscription_id(s: *const Subscription) -> u32 {
+    (*s).0.id()
 }
 
-pub unsafe fn unsubscribe(s: &Subscription) {
-    s.0.unsubscribe();
+pub unsafe fn unsubscribe(s: *const Subscription) {
+    (*s).0.unsubscribe();
 }
 
 pub unsafe fn release_subscription(s: *mut Subscription) {
@@ -245,8 +251,8 @@ pub unsafe fn release_subscription(s: *mut Subscription) {
     }
 }
 
-pub unsafe fn get(h: &Hub, id: u32, kind_out: &mut u8) -> Vec<u8> {
-    match h.0.get(id) {
+pub unsafe fn get(h: *const Hub, id: u32, kind_out: *mut u8) -> Vec<u8> {
+    match (*h).0.get(id) {
         Some((kind, bytes)) => {
             *kind_out = kind as u8;
             bytes.to_vec()

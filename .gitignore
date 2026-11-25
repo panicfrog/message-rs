@@ -636,3 +636,7 @@ fabric.properties
 
 # Claude Code local state
 .claude/
+
+# ---- message-rs hub ----
+# The xcframework is a build product of hub/swift/scripts/build-xcframework.sh
+hub/swift/Artifacts/
