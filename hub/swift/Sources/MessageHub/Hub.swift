@@ -1,3 +1,5 @@
+import Dispatch
+import Foundation
 import MessageHubCxx
 
 /// A Swift closure callable from Rust, with the context pair the bridge hands back.
@@ -127,6 +129,15 @@ extension Hub {
         subscribe_inner(id: id, scheduler: scheduler, handler)
     }
 
+    /// `subscribe(on:)` with a `DispatchQueue`: every delivery is handed to the queue.
+    public func subscribe(
+        on queue: DispatchQueue,
+        id: UInt32,
+        _ handler: @escaping @Sendable (UInt32, UInt8, UnsafePointer<UInt8>?, Int) -> Void
+    ) -> Subscription {
+        subscribe(on: { job in queue.async(execute: job) }, id: id, handler)
+    }
+
     private func subscribe_inner(
         id: UInt32,
         scheduler: (@Sendable (@escaping @Sendable () -> Void) -> Void)?,
@@ -174,9 +185,30 @@ extension Hub {
         guard let scheduleCtx, let jobCtx, let run, let drop else { return }
         let runFn = unsafeBitCast(run, to: (@convention(c) (UnsafeMutableRawPointer?) -> Void).self)
         let dropFn = unsafeBitCast(drop, to: (@convention(c) (UnsafeMutableRawPointer?) -> Void).self)
+        // The job pointer is owned by this closure from here on (the bridge hands it over at
+        // schedule time and frees it through `drop`): erase its non-Sendable type explicitly.
+        let job = JobHandle(jobCtx, run: runFn, drop: dropFn)
         Unmanaged<SchedulerBox>.fromOpaque(scheduleCtx).takeUnretainedValue().schedule {
-            runFn(jobCtx)
-            dropFn(jobCtx)
+            job.run()
+        }
+    }
+
+    /// A scheduled bridge job: the raw context plus its run/drop functions, `Sendable` because
+    /// ownership transfers with it (the scheduler runs it once, then drops it).
+    private final class JobHandle: @unchecked Sendable {
+        private let ctx: UnsafeMutableRawPointer
+        private let runFn: @convention(c) (UnsafeMutableRawPointer?) -> Void
+        private let dropFn: @convention(c) (UnsafeMutableRawPointer?) -> Void
+
+        init(_ ctx: UnsafeMutableRawPointer, run: @convention(c) (UnsafeMutableRawPointer?) -> Void, drop: @convention(c) (UnsafeMutableRawPointer?) -> Void) {
+            self.ctx = ctx
+            self.runFn = run
+            self.dropFn = drop
+        }
+
+        func run() {
+            runFn(ctx)
+            dropFn(ctx)
         }
     }
 

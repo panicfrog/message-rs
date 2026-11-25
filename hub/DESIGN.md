@@ -301,6 +301,14 @@ distribution can wait.
   (`const T&`) are **not imported at all** — the bridge therefore takes every handle as a raw
   pointer, and `shared_ptr()` is the pointer-returning variant of `shared()`. Opaque types stay
   invisible in Swift: handles are `OpaquePointer` end to end.
-- Next: M3 (Observable-style surface: AsyncSequence of events, an ObservableObject mirror per
-  id, `subscribe(on:)` onto DispatchQueue/@MainActor), then M4 (Kotlin/JNI).
+- M3 is in place: `hub/swift/Sources/MessageHub/Observable.swift` adds `hub.events(id:)`
+  (an `AsyncStream<HubEvent>` whose continuation is resumed from a relay queue — yielding
+  straight from the hub's callback threads wakes the consumer unreliably), `HubObservable`
+  (an `ObservableObject` mirror per id with `@Published` lastValue/lastBytes/isClosed and a
+  pull-first `refresh()`), and `subscribe(on: DispatchQueue)`. Two environment notes the
+  tests encode: this toolchain's Testing.framework crashes the process (signal 5) when a test
+  bundle exposes async XCTest entry points, so the async bodies run inside bounded detached
+  tasks; and Combine's `Published.sink` crashes the .xctest bundle too (SwiftUICore link is
+  refused), so mirror tests poll instead — real SwiftUI apps are unaffected.
+- Next: M4 (`hub-jni` + Kotlin Flow wrapper), then M5 (`hub-turbo`).
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.
