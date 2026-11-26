@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "message-rs data hub for React Native: publish/subscribe/pull over the shared Rust core (jsi-turbo).",
   "license": "MIT",
-  "main": "generated/rust-turbo/Hub.ts",
+  "main": "index.ts",
   "files": [
     "src/",
     "generated/",
@@ -25,5 +25,6 @@
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
     "@types/node": "^22.0.0"
-  }
+  },
+  "types": "index.ts"
 }
