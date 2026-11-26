@@ -107,7 +107,20 @@ android {
     }
 }
 
+// The Kotlin wrapper of the data hub lives in the repository (hub/kotlin); symlinked here so
+// there is one source of truth. Its native symbols come from librustturbo.so, which already
+// links the core once (see ../../PLAN.md).
+android {
+    sourceSets {
+        main {
+            java.srcDirs += 'src/main/hubwrapper'
+        }
+    }
+}
+
 dependencies {
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 

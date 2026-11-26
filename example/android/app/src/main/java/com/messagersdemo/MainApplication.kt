@@ -14,14 +14,18 @@ class MainApplication : Application(), ReactApplication {
       context = applicationContext,
       packageList =
         PackageList(this).packages.apply {
-          // Packages that cannot be autolinked yet can be added manually here, for example:
-          // add(MyReactNativePackage())
+          // The Kotlin surface of the data hub (one Rust registry shared with JS).
+          add(com.messagersdemo.hub.HubNativePackage())
         },
     )
   }
 
   override fun onCreate() {
     super.onCreate()
+    // The hub's JNI symbols live in librustturbo.so (the framework links librust_app.a, which
+    // carries the core and hub-jni, into it). Must be set before message.rs.hub.Hub is touched:
+    // loading a second library with its own core would give the app two registries.
+    System.setProperty("hub.libName", "rustturbo")
     loadReactNative(this)
   }
 }

@@ -123,6 +123,16 @@ This step is the real work; the app around it is scaffolding.
   this setup — the UI (and a screenshot) is the reliable channel, which is why the app renders
   every scenario's verdict.
 
+## Android findings
+
+- The framework links `librust_app.a` **statically into `librustturbo.so`**, so the Kotlin
+  wrapper must load `rustturbo` — not `hub_jni`, not `rust_app`. `MainApplication.onCreate`
+  sets `System.setProperty("hub.libName", "rustturbo")` before anything touches `Hub`.
+- The RN template sets `reactNativeArchitectures` to four ABIs; building all of them needs four
+  Rust targets installed. For the demo, `-PreactNativeArchitectures=arm64-v8a` is enough.
+- Verified in `librustturbo.so` (arm64, unstripped): exactly one `Hub::shared::SHARED`, 28
+  `Java_message_rs_hub_*` symbols and the Hub turbo anchor — one core, both surfaces.
+
 ## App shape (after step 0)
 
 ```
