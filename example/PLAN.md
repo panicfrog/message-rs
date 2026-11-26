@@ -55,6 +55,25 @@ One Rust build per app, every surface links against it:
 - Verify by symbol inspection first (`nm`: exactly one `Hub::shared()` / one `OnceLock`), then
   by the runtime test below.
 
+**Chosen: plan A** (lower cognitive load — installing one package is enough, no hand-written
+aggregate crate). Implemented as platform-conditional dependencies in `hub/turbo/Cargo.toml`:
+iOS/macOS pull in `hub-ffi`, Android pulls in `hub-jni`.
+
+Verified with a throwaway aggregate crate in this repo's scope (core + hub-ffi, staticlib):
+the artifact contains **exactly one** `Hub::shared::SHARED` static and 171 Swift-bridge
+symbols — one build carries both the core and the native surface.
+
+Both surfaces now have their superlib mode, verified locally:
+
+- **Swift**: `MESSAGE_HUB_SUPERLIB=1 swift build` compiles the wrapper with **headers only**
+  (no binaryTarget) — the symbols resolve at the app's final link. Default mode unchanged
+  (10 tests pass with the xcframework).
+- **Kotlin**: `-Dhub.libName=rust_app` loads the aggregate superlib instead of `hub_jni`;
+  default unchanged (9 tests pass).
+
+Remaining for step 0: prove it end-to-end in the demo app (one registry, cross-language
+delivery), which needs the app itself.
+
 This step is the real work; the app around it is scaffolding.
 
 ## App shape (after step 0)

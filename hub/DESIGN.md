@@ -243,6 +243,15 @@ CI covers every surface: `cargo test --workspace` (core + the JNI Java twin), `h
 gradlew test with -PhubLibDir), `hub-turbo` (tsc + vitest on the emitter layer). The RN app
 build itself stays out of CI — it needs pods/NDK and a running app.
 
+One Rust copy per process (the demo's prerequisite, see example/PLAN.md): each surface used to
+ship its own core, and symbol inspection showed three distinct `Hub::shared::SHARED` statics
+with different crate hashes — the linker never coalesces them, so the ends could not see each
+other. Fixed by making `hub-turbo` carry the platform's native surface (iOS/macOS: `hub-ffi`,
+Android: `hub-jni`), so installing that one package links a single core. The Swift package gains
+a superlib mode (`MESSAGE_HUB_SUPERLIB=1`: headers only, no xcframework) and the Kotlin wrapper
+a library-name switch (`-Dhub.libName=rust_app`). Verified: an aggregate of core + hub-ffi has
+exactly one SHARED static and both symbol sets; both Swift modes build; all existing tests pass.
+
 Distribution (to confirm): `message-hub` and the two RN-independent surfaces (`hub-ffi`,
 `hub-jni`) as crates.io crates — pure Rust, no React Native version coupling — so the superlib's
 cargo build resolves them normally; `hub-turbo` ships as an npm package the jsi-turbo way; the

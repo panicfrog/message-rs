@@ -75,17 +75,27 @@ class Hub private constructor(
         @JvmStatic
         fun copyBytesPublic(ptr: Long, len: Int): ByteArray = copyBytes(ptr, len)
 
+        /**
+         * The native library carrying the JNI symbols. Two link modes (see example/PLAN.md):
+         * - `hub_jni` (default): the standalone cdylib, for apps using only the Kotlin surface;
+         * - `rust_app`: a React Native app's aggregate superlib, which hub-turbo already links
+         *   the core and hub-jni into. Loading both would give two `Hub::shared()` registries.
+         *
+         * Set `-Dhub.libName=rust_app` before the class is first touched to pick it.
+         */
+        private val libName: String = System.getProperty("hub.libName") ?: "hub_jni"
+
         init {
             // Android apps resolve the library from the APK's native lib dir; host-JVM tests
             // pass -Dhub.lib=<dir> and this loads it by absolute path instead.
             try {
-                System.loadLibrary("hub_jni")
+                System.loadLibrary(libName)
             } catch (e: UnsatisfiedLinkError) {
                 val dir = System.getProperty("hub.lib")?.let { java.io.File(it) }
-                    ?: throw IllegalStateException("hub_jni not on java.library.path and hub.lib is unset")
-                val lib = listOf("libhub_jni.dylib", "libhub_jni.so", "hub_jni.dll")
+                    ?: throw IllegalStateException("$libName not on java.library.path and hub.lib is unset")
+                val lib = listOf("lib$libName.dylib", "lib$libName.so", "$libName.dll")
                     .firstNotNullOfOrNull { java.io.File(dir, it).takeIf(java.io.File::exists) }
-                    ?: throw IllegalStateException("hub_jni not found in $dir", e)
+                    ?: throw IllegalStateException("$libName not found in $dir", e)
                 System.load(lib.absolutePath)
             }
         }

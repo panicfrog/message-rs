@@ -14,11 +14,25 @@ crate-type = ["lib"]
 # directory (node_modules/hub-turbo), not its target, so the repo-relative
 # path breaks once installed into an app
 message-hub = { path = "/Volumes/YYP_PSSD/Source/message-rs/hub" }
+
 jsi = { path = "../react-native-rust-turbo/rust/jsi", default-features = false, features = ["macros", "serde"] }
 jsi-turbo = { path = "../react-native-rust-turbo/rust/jsi-turbo" }
 linkme = "0.3"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+
+# The other surfaces ride along so an app links ONE copy of the core: each static copy would
+# get its own `Hub::shared()` OnceLock (different crate hashes never coalesce), and the three
+# ends would silently fail to see each other. Installing this package is therefore enough —
+# no hand-written aggregate crate needed.
+#   iOS/macOS: the Swift surface (cxx bridge) — its symbols serve the MessageHub Swift package
+#              in "superlib mode" (headers only, no xcframework of its own).
+#   Android:   the Kotlin surface (JNI) — its Java_* symbols land in the same .so.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+hub-ffi = { path = "/Volumes/YYP_PSSD/Source/message-rs/hub/ffi" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+hub-jni = { path = "/Volumes/YYP_PSSD/Source/message-rs/hub/jni" }
 
 # standalone: only ever built through the app's aggregate superlib, whose dependency
 # paths resolve inside node_modules; keeping this out of the workspace avoids resolving
