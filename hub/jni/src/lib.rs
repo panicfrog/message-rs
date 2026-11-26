@@ -365,3 +365,77 @@ pub extern "system" fn Java_message_rs_hub_Hub_00024Companion_copyBytes(
         Err(_) => ptr::null_mut(),
     }
 }
+
+// ---- Aliases for Kotlin's @JvmStatic external declarations ----
+// Kotlin compiles `companion object { @JvmStatic external fun f }` to a static method on the
+// outer class, so the JVM looks up `Java_..._Hub_f` — export both spellings for every entry.
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_sharedHandle(env: JNIEnv, c: JClass) -> jlong {
+    Java_message_rs_hub_Hub_00024Companion_sharedHandle(env, c)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_createHandle(env: JNIEnv, c: JClass) -> jlong {
+    Java_message_rs_hub_Hub_00024Companion_createHandle(env, c)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_releaseHandle(env: JNIEnv, c: JClass, h: jlong) {
+    Java_message_rs_hub_Hub_00024Companion_releaseHandle(env, c, h)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_createPublisher(env: JNIEnv, c: JClass, h: jlong, id: jint, k: jbyte) -> jlong {
+    Java_message_rs_hub_Hub_00024Companion_createPublisher(env, c, h, id, k)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_subscribeNative(env: JNIEnv, c: JClass, h: jlong, id: jint, cb: JObject) -> jlong {
+    Java_message_rs_hub_Hub_00024Companion_subscribeNative(env, c, h, id, cb)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_subscribeOnNative(env: JNIEnv, c: JClass, h: jlong, id: jint, cb: JObject, s: JObject) -> jlong {
+    Java_message_rs_hub_Hub_00024Companion_subscribeOnNative(env, c, h, id, cb, s)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_unsubscribeNative(env: JNIEnv, c: JClass, h: jlong) {
+    Java_message_rs_hub_Hub_00024Companion_unsubscribeNative(env, c, h)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_releaseSubscription(env: JNIEnv, c: JClass, h: jlong) {
+    Java_message_rs_hub_Hub_00024Companion_releaseSubscription(env, c, h)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_runJob(env: JNIEnv, c: JClass, j: jlong) {
+    Java_message_rs_hub_Hub_00024Companion_runJob(env, c, j)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_publishNative(env: JNIEnv, c: JClass, h: jlong, p: jbyteArray) {
+    Java_message_rs_hub_Hub_00024Companion_publishNative(env, c, h, p)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_closeNative(env: JNIEnv, c: JClass, h: jlong) {
+    Java_message_rs_hub_Hub_00024Companion_closeNative(env, c, h)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_releasePublisher(env: JNIEnv, c: JClass, h: jlong) {
+    Java_message_rs_hub_Hub_00024Companion_releasePublisher(env, c, h)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_getNative(env: JNIEnv, c: JClass, h: jlong, id: jint) -> jlongArray {
+    Java_message_rs_hub_Hub_00024Companion_getNative(env, c, h, id)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_message_rs_hub_Hub_copyBytes(env: JNIEnv, c: JClass, p: jlong, l: jint) -> jbyteArray {
+    Java_message_rs_hub_Hub_00024Companion_copyBytes(env, c, p, l)
+}

@@ -2,7 +2,14 @@
 
 package message.rs.hub
 
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import java.nio.ByteBuffer
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 
 /**
  * The data hub: one registry per process shared by every end, or an isolated instance for
@@ -22,50 +29,65 @@ class Hub private constructor(
         val shared: Hub = Hub(sharedHandle(), owned = false)
 
         @JvmStatic
-        private external fun sharedHandle(): Long
+        public external fun sharedHandle(): Long
 
         @JvmStatic
-        private external fun createHandle(): Long
+        public external fun createHandle(): Long
 
         @JvmStatic
-        private external fun releaseHandle(handle: Long)
+        public external fun releaseHandle(handle: Long)
 
         @JvmStatic
-        internal external fun createPublisher(handle: Long, id: Long, kind: Int): Long
+        public external fun createPublisher(handle: Long, id: Long, kind: Int): Long
 
         @JvmStatic
-        internal external fun subscribeNative(handle: Long, id: Long, callback: Any): Long
+        public external fun subscribeNative(handle: Long, id: Long, callback: Any): Long
 
         @JvmStatic
-        internal external fun subscribeOnNative(handle: Long, id: Long, callback: Any, scheduler: Any): Long
+        public external fun subscribeOnNative(handle: Long, id: Long, callback: Any, scheduler: Any): Long
 
         @JvmStatic
-        internal external fun unsubscribeNative(handle: Long)
+        public external fun unsubscribeNative(handle: Long)
 
         @JvmStatic
-        internal external fun releaseSubscription(handle: Long)
+        public external fun releaseSubscription(handle: Long)
 
         /** The scheduler entry point: runs one scheduled delivery. Exactly once per job. */
         @JvmStatic
-        internal external fun runJob(jobCtx: Long)
+        public external fun runJob(jobCtx: Long)
 
         @JvmStatic
-        internal external fun publishNative(handle: Long, payload: ByteArray)
+        public external fun publishNative(handle: Long, payload: ByteArray)
 
         @JvmStatic
-        internal external fun closeNative(handle: Long)
+        public external fun closeNative(handle: Long)
 
         @JvmStatic
-        internal external fun releasePublisher(handle: Long)
+        public external fun releasePublisher(handle: Long)
 
         @JvmStatic
-        internal external fun getNative(handle: Long, id: Long): LongArray?
+        public external fun getNative(handle: Long, id: Long): LongArray?
 
         @JvmStatic
-        internal external fun copyBytes(ptr: Long, len: Int): ByteBuffer
+        public external fun copyBytes(ptr: Long, len: Int): ByteArray
+
+        /** Copies `len` bytes at `ptr` (a callback payload) into a fresh array. */
+        @JvmStatic
+        fun copyBytesPublic(ptr: Long, len: Int): ByteArray = copyBytes(ptr, len)
 
         init {
-            System.loadLibrary("hub_jni")
+            // Android apps resolve the library from the APK's native lib dir; host-JVM tests
+            // pass -Dhub.lib=<dir> and this loads it by absolute path instead.
+            try {
+                System.loadLibrary("hub_jni")
+            } catch (e: UnsatisfiedLinkError) {
+                val dir = System.getProperty("hub.lib")?.let { java.io.File(it) }
+                    ?: throw IllegalStateException("hub_jni not on java.library.path and hub.lib is unset")
+                val lib = listOf("libhub_jni.dylib", "libhub_jni.so", "hub_jni.dll")
+                    .firstNotNullOfOrNull { java.io.File(dir, it).takeIf(java.io.File::exists) }
+                    ?: throw IllegalStateException("hub_jni not found in $dir", e)
+                System.load(lib.absolutePath)
+            }
         }
 
         /** An isolated registry (tests, tools). Close it to free the native side. */
@@ -87,9 +109,9 @@ class Hub private constructor(
         return Subscription(s, id)
     }
 
-    /** Subscribes with every delivery dispatched onto [dispatcher]. */
-    fun subscribeOn(id: Long, dispatcher: java.util.concurrent.Executor, callback: SubscriptionCallback): Subscription {
-        val s = subscribeOnNative(handle, id, callback, ExecutorScheduler(dispatcher))
+    /** Subscribes with every delivery dispatched onto [executor]. */
+    fun subscribeOn(id: Long, executor: Executor, callback: SubscriptionCallback): Subscription {
+        val s = subscribeOnNative(handle, id, callback, ExecutorScheduler(executor))
         require(s != 0L) { "subscribeOn failed" }
         return Subscription(s, id)
     }
@@ -101,8 +123,7 @@ class Hub private constructor(
         val len = out[3].toInt()
         if (len == 0) return PulledValue(kind, ByteArray(0))
         // Copy before the next publish replaces the payload.
-        val bytes = ByteArray(len)
-        copyBytes(out[1], len).get(bytes, 0, len)
+        val bytes = copyBytes(out[1], len)
         return PulledValue(kind, bytes)
     }
 
@@ -110,7 +131,7 @@ class Hub private constructor(
         if (owned) releaseHandle(handle)
     }
 
-    @Suppress("removal")
+    @Suppress("removal", "FinalizeCalledExplicitly")
     protected fun finalize() {
         if (owned) releaseHandle(handle)
     }
@@ -128,7 +149,7 @@ fun interface SubscriptionCallback {
  * Schedules each delivery as `executor.execute { Hub.runJob(jobCtx) }`. The job must run
  * exactly once; the native side frees it as part of running.
  */
-class ExecutorScheduler(private val executor: java.util.concurrent.Executor) {
+class ExecutorScheduler(private val executor: Executor) {
     @Suppress("unused") // called from the native side
     fun schedule(jobCtx: Long) {
         executor.execute { Hub.runJob(jobCtx) }
@@ -148,11 +169,11 @@ class Publisher internal constructor(
     fun publish(value: Value) = publish(value.encode(kind))
 
     /** Closes: subscribers get Closed when this is the id's last live publisher. */
-    fun close() = Hub.closeNative(handle)
+    fun closePublisher() = Hub.closeNative(handle)
 
-    override fun close() = close()
+    override fun close() = closePublisher()
 
-    @Suppress("removal")
+    @Suppress("removal", "FinalizeCalledExplicitly")
     protected fun finalize() {
         Hub.releasePublisher(handle)
     }
@@ -167,7 +188,7 @@ class Subscription internal constructor(
 
     override fun close() = unsubscribe()
 
-    @Suppress("removal")
+    @Suppress("removal", "FinalizeCalledExplicitly")
     protected fun finalize() {
         Hub.releaseSubscription(handle)
     }
@@ -250,4 +271,69 @@ internal object ValueCodec {
         ValueKind.BYTES -> Value.Bytes(p)
         ValueKind.MESSAGE -> Value.Message(p)
     }
+}
+
+// ---- Flow surfaces ----
+
+/** One delivery: a published payload, or Closed (`kind == CLOSED_KIND && bytes == null`). */
+class HubEvent(val id: Long, val kind: Int, val bytes: ByteArray?) {
+    val isClosed: Boolean get() = kind == CLOSED_KIND && bytes == null
+
+    override fun equals(other: Any?): Boolean =
+        other is HubEvent && other.id == id && other.kind == kind && other.bytes.contentEquals(bytes)
+
+    override fun hashCode(): Int = ((id * 31 + kind).toInt() * 31) + (bytes?.contentHashCode() ?: 0)
+}
+
+/**
+ * Every event of `id` as a flow. Deliveries are scheduled onto [executor] (default: a private
+ * single-thread pool); the flow is a wake-up channel — the current value always comes from
+ * [Hub.get] (events are drop-oldest under pressure).
+ */
+fun Hub.events(
+    id: Long,
+    executor: Executor = Executors.newSingleThreadExecutor { Thread(it, "hub-events-$id") },
+): Flow<HubEvent> {
+    val flow = MutableSharedFlow<HubEvent>(
+        replay = 0,
+        extraBufferCapacity = 256,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    subscribeOn(id, executor) { _, kind, ptr, len ->
+        val bytes = if (ptr == 0L) null else Hub.copyBytesPublic(ptr, len)
+        flow.tryEmit(HubEvent(id, kind, bytes))
+    }
+    return flow.asSharedFlow()
+}
+
+/**
+ * StateFlow-style mirror of one id: the newest pulled value plus the closed flag. Deliveries
+ * are scheduled onto [executor] and refresh the state through the pull path (the mirror can
+ * never observe a torn payload).
+ */
+class HubState(
+    private val hub: Hub = Hub.shared,
+    val id: Long,
+    executor: Executor = Executors.newSingleThreadExecutor { Thread(it, "hub-state-$id") },
+) : AutoCloseable {
+    private val _last = MutableStateFlow<PulledValue?>(null)
+    val last: MutableStateFlow<PulledValue?> get() = _last
+
+    private val _closed = MutableStateFlow(false)
+    val closed: MutableStateFlow<Boolean> get() = _closed
+
+    private val subscription = hub.subscribeOn(id, executor) { _, kind, ptr, _ ->
+        if (kind == CLOSED_KIND && ptr == 0L) {
+            _closed.value = true
+        } else {
+            _last.value = hub.get(id)
+        }
+    }
+
+    /** Pull-first: seeds the state before the first push arrives. */
+    fun refresh() {
+        _last.value = hub.get(id)
+    }
+
+    override fun close() = subscription.close()
 }

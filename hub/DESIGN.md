@@ -313,18 +313,21 @@ distribution can wait.
   target removed every workaround (no bounded detached tasks, no polling instead of sinks).
   A caveat learned the hard way: a `Test` that subscribes must create the stream before the
   first publish — the hub is pure forwarding and never replays.
-- M4's Rust side is in place: `hub/jni/` (crate `hub-jni`, a workspace member) exposes 14
-  `Java_message_rs_hub_Hub_00024Companion_*` symbols — all native methods Kotlin declares live
-  on `Hub.Companion`, so the JVM names are stable. Callbacks are `GlobalRef`s with a
-  pre-looked-up `onEvent(JIJI)V`; schedulers are `GlobalRef`s with `schedule(J)V` that must
-  call `runJob(jobCtx)` exactly once per job (the job frees itself as part of running). The
-  host-JVM conformance test (`tests/jni_java.rs` + `tests/java/`) drives a Java twin of the
-  wrapper through `cargo test -p hub-jni`: push/pull, no replay, Closed, scheduled delivery
-  on an executor thread, the shared registry and unsubscribe all pass; `cargo ndk` builds the
-  Android cdylib with the same symbols. The Kotlin wrapper itself (`hub/kotlin/`) carries the
-  plan and the sources: `Hub`, `Publisher`, `Subscription`, `ValueKind`/`Value`, with
-  `ExecutorScheduler` as the dispatch adapter — it still needs a Gradle module and device-level
-  conformance (M4's remaining half).
+- M4 is complete. `hub/jni/` (crate `hub-jni`) exposes every entry point under **two** symbol
+  spellings — `Java_..._Hub_00024Companion_f` and `Java_..._Hub_f` — because Kotlin compiles
+  `companion object { @JvmStatic external fun f }` to a static method on the outer class, so
+  the JVM resolves the short name (an `internal` modifier also mangles the name: external
+  declarations must be `public`). Callbacks are `GlobalRef`s with a pre-looked-up
+  `onEvent(JIJI)V`; schedulers are `GlobalRef`s with `schedule(J)V` that must call
+  `runJob(jobCtx)` exactly once per job. The host-JVM conformance runs on both levels:
+  `cargo test -p hub-jni` drives a Java twin, and `hub/kotlin/` is the Gradle module
+  (`hub-kotlin`, plain Kotlin/JVM + kotlinx-coroutines as its only dependency) whose 9
+  JUnit tests load the dylib by `-Dhub.lib` absolute path and cover push/pull, no replay,
+  Closed, executor-thread scheduling, the shared registry, the value codec, the Rust message
+  vector byte-for-byte, and the Flow surfaces (`Hub.events` as a SharedFlow wake-up channel
+  and `HubState` as a StateFlow mirror refreshed through pull — it can never observe a torn
+  payload). `cargo ndk` builds the same symbols for Android; an Android library module
+  wrapping these sources for device-level use is the only piece left optional.
 - The Swift superlib link-mode question (one Rust copy shared with the jsi side) is deferred
   until jsi-rs lands: only its compile-time half has been probed (bridge symbols typecheck in
   Swift without linking the Rust library); the final-link half needs the real superlib
