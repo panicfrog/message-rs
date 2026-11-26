@@ -1,13 +1,14 @@
 # example/: the message-rs demo app — implementation plan
 
-**iOS result (2026-11-26): ALL PASS** — see `docs/ios-all-pass.png`. Five scenarios run on
-launch: JS→JS, JS→Swift, Swift→JS, shared pull (both ends read one store), Closed across
-languages (exactly once, pull empty afterwards). One Rust registry, verified at runtime.
-Android/Kotlin is the remaining half.
+**Both platforms pass (2026-11-26)** — `docs/ios-all-pass.png`, `docs/android-all-pass.png`.
+Five scenarios run on launch: JS→JS, JS→native, native→JS, shared pull (both ends read one
+store), Closed across languages (exactly once, pull empty afterwards). `native` is Swift on iOS
+and Kotlin on Android. One Rust registry per process, verified at runtime on both.
+See README.md for how to run it.
 
 Scope (settled with the user): a React Native app inside this repository that verifies **all
-three surfaces share one Rust registry**. Steps 0–2 are done for iOS; step 3's Android half and
-step 4/5 automation remain.
+three surfaces share one Rust registry**. Steps 0–3 are done on both platforms; what remains is
+step 4 (automating the run) and step 5 (whether any of it belongs in CI).
 
 ## Why our own demo (not jsi-rs's example)
 
@@ -132,6 +133,10 @@ This step is the real work; the app around it is scaffolding.
   Rust targets installed. For the demo, `-PreactNativeArchitectures=arm64-v8a` is enough.
 - Verified in `librustturbo.so` (arm64, unstripped): exactly one `Hub::shared::SHARED`, 28
   `Java_message_rs_hub_*` symbols and the Hub turbo anchor — one core, both surfaces.
+- Runtime: `HUB_DEMO_RESULT 5/5`. Like iOS, the app defaults to port 8081 (another project's
+  Metro here); point it at ours by writing `debug_http_host` into the app's SharedPreferences
+  (`adb shell run-as com.messagersdemo ...`) plus `adb reverse tcp:8088 tcp:8088`. Unlike iOS,
+  Android's JS console does reach `adb logcat -s ReactNativeJS`, which makes automation easy.
 
 ## App shape (after step 0)
 

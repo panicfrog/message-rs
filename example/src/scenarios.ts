@@ -59,9 +59,9 @@ async function jsToJs(): Promise<Result> {
   }
 }
 
-/** JS publishes, the Swift subscription fires and reports back through the RN event emitter. */
+/** JS publishes, the native subscription fires and reports back through the RN emitter. */
 async function jsToSwift(): Promise<Result> {
-  if (!native) return { name: 'JS → Swift', ok: false, detail: 'HubNative module missing' };
+  if (!native) return { name: 'JS → native', ok: false, detail: 'HubNative module missing' };
   const id = 9002;
   const seen: number[][] = [];
   const emitter = new NativeEventEmitter(NativeModules.HubNative);
@@ -76,16 +76,16 @@ async function jsToSwift(): Promise<Result> {
     const arrived = await until(() => seen.length >= 1);
     const ok = arrived && eq(seen[0], [7, 8, 9]);
     closePublisher(h);
-    return { name: 'JS → Swift', ok, detail: ok ? 'Swift saw the JS bytes' : `swift saw ${JSON.stringify(seen)}` };
+    return { name: 'JS → native', ok, detail: ok ? 'the native side saw the JS bytes' : `native saw ${JSON.stringify(seen)}` };
   } finally {
     listener.remove();
     native.unsubscribeNative(subHandle);
   }
 }
 
-/** Swift publishes, the JS channel receives — the reverse direction of the same registry. */
+/** The native side publishes, the JS channel receives — the reverse direction. */
 async function swiftToJs(): Promise<Result> {
-  if (!native) return { name: 'Swift → JS', ok: false, detail: 'HubNative module missing' };
+  if (!native) return { name: 'native → JS', ok: false, detail: 'HubNative module missing' };
   const id = 9003;
   const seen: number[][] = [];
   const off = channel(id, (e) => { if (!e.closed && e.bytes) seen.push(e.bytes); });
@@ -94,26 +94,26 @@ async function swiftToJs(): Promise<Result> {
     const arrived = await until(() => seen.length >= 1);
     const ok = arrived && eq(seen[0], [4, 5, 6]);
     native.closePublisher(handle);
-    return { name: 'Swift → JS', ok, detail: ok ? 'JS saw the Swift bytes' : `js saw ${JSON.stringify(seen)}` };
+    return { name: 'native → JS', ok, detail: ok ? 'JS saw the native bytes' : `js saw ${JSON.stringify(seen)}` };
   } finally {
     off();
   }
 }
 
-/** One store: Swift publishes, JS pulls the identical bytes (and the other way round). */
+/** One store: the native side publishes, JS pulls the identical bytes. */
 async function sharedPull(): Promise<Result> {
   if (!native) return { name: 'shared pull', ok: false, detail: 'HubNative module missing' };
   const id = 9004;
-  const handle = await native.publishFromNative(id, ValueKind.STRING, ascii('from swift'));
+  const handle = await native.publishFromNative(id, ValueKind.STRING, ascii('from native'));
   try {
     const jsPulled = pull(id);
-    const swiftPulled = await native.pullFromNative(id);
-    const expected = ascii('from swift');
-    const ok = !!jsPulled && eq(bytesOf(jsPulled), expected) && !!swiftPulled && eq(swiftPulled.bytes, expected);
+    const nativePulled = await native.pullFromNative(id);
+    const expected = ascii('from native');
+    const ok = !!jsPulled && eq(bytesOf(jsPulled), expected) && !!nativePulled && eq(nativePulled.bytes, expected);
     return {
       name: 'shared pull',
       ok,
-      detail: ok ? 'both ends read the same store' : `js=${jsPulled ? bytesOf(jsPulled) : null} swift=${swiftPulled?.bytes ?? null}`,
+      detail: ok ? 'both ends read the same store' : `js=${jsPulled ? bytesOf(jsPulled) : null} native=${nativePulled?.bytes ?? null}`,
     };
   } finally {
     native.closePublisher(handle);
