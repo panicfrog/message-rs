@@ -1,8 +1,7 @@
 # M5: hub-turbo (RN / JS surface) — implementation plan
 
-Status: planned 2026-11-26, informed by reading jsi-rs (checkout at
-`/Volumes/YYP_PSSD/Source/jsi-rs`, RN 0.88 / react-native-rust-turbo 0.88.5) and its
-`example/native/jsi-demo-module`. No code yet.
+Status: steps 1, 2 and the typecheck of 4 are done (2026-11-26); what remains is 3
+(in-app conformance) and 5 (CI wiring). Findings recorded below.
 
 ## Shape
 
@@ -50,6 +49,24 @@ TS, in the package):
 - Push is wake-up + pull: the callback fires, JS calls `get(id)` for the current bytes
   (zero-copy ArrayBuffer). This matches DESIGN section 1's RN row and keeps the JS side
   free of payload buffering.
+
+## Verified so far
+
+- `hub/turbo` installs into the jsi-rs example app by `file:` symlink; the superlib build
+  (build.js, `aarch64-apple-darwin`) compiles `hub-turbo` in with the `Hub` force anchor and
+  produces `librust_app.a`.
+- The macros emit `generated/rust-turbo/Hub.ts` (+ `structs/`) during that build — committed
+  like every other generated artifact.
+- `message-hub` resolves by **absolute path** in hub-turbo's Cargo.toml: cargo follows path
+  deps through the npm symlink's literal directory, not the link target. A published version
+  replaces this with a crates.io dependency.
+- The TS layer (`index.ts`: channel/pull/publish/publisher handles) typechecks standalone
+  (`types.d.ts` declares the `require` the generated bootstrap uses).
+- API shapes that fell out of the macro's constraints: `get` returns the ArrayBuffer alone
+  (JsiArrayBuffer is not serde-serializable, so it cannot sit in a TurboStruct); the kind
+  rides a thread-local read by the `kind` getter right after. `publish` routes through a
+  registered publisher handle — a one-shot publisher would close on drop and deliver Closed
+  spuriously.
 
 ## What cannot be done on this machine now
 
