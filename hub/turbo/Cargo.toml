@@ -1,0 +1,26 @@
+[package]
+name = "hub-turbo"
+description = "RN (jsi-turbo) surface of the message-hub core: the Hub turbo module"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+# consumed by the app's aggregate library (built by react-native-rust-turbo)
+crate-type = ["lib"]
+
+[dependencies]
+# absolute: cargo resolves path deps through the npm file: symlink's literal
+# directory (node_modules/hub-turbo), not its target, so the repo-relative
+# path breaks once installed into an app
+message-hub = { path = "/Volumes/YYP_PSSD/Source/message-rs/hub" }
+jsi = { path = "../react-native-rust-turbo/rust/jsi", default-features = false, features = ["macros", "serde"] }
+jsi-turbo = { path = "../react-native-rust-turbo/rust/jsi-turbo" }
+linkme = "0.3"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+# standalone: only ever built through the app's aggregate superlib, whose dependency
+# paths resolve inside node_modules; keeping this out of the workspace avoids resolving
+# the jsi path dependencies here
+[workspace]

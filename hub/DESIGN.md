@@ -227,7 +227,7 @@ impl Subscription {
   conformance via `Schema.kt`. The wrapper owns the publisher handles and must close them from
   its lifecycle (`ViewModel.onCleared`), not rely on GC. Android is unaffected by the SwiftPM
   move: the cargo build keeps running from the gradle `rustTurboBuild` task.
-- **M5** — `hub-turbo`: a jsi-turbo module package (an npm package whose crate is built into the
+- **M5 (in progress)** — `hub-turbo`: a jsi-turbo module package (an npm package whose crate is built into the
   app's superlib, the way `example/native/jsi-demo-module` is in jsi-rs); JS emitter API +
   `decodeBy` integration; push as wake-up + zero-copy pull. Metadata is SwiftPM-first
   (`Package.swift` + `swiftpmConfig` in `package.json`), with a podspec only for apps that opt

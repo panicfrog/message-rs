@@ -1,0 +1,20 @@
+{
+  "name": "@message-rs/hub-turbo",
+  "version": "0.1.0",
+  "description": "message-rs data hub for React Native: publish/subscribe/pull over the shared Rust core (jsi-turbo).",
+  "license": "MIT",
+  "main": "generated/rust-turbo/Hub.ts",
+  "files": [
+    "src/",
+    "generated/",
+    "Cargo.toml",
+    "index.ts"
+  ],
+  "rust-turbo": {
+    "crate": ".",
+    "crateName": "hub-turbo",
+    "modules": [
+      "Hub"
+    ]
+  }
+}
