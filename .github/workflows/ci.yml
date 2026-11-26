@@ -72,6 +72,10 @@ jobs:
         working-directory: hub/swift
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
       # the package's binaryTarget: build the Rust slices into an xcframework first
       - run: ./scripts/build-xcframework.sh
       - run: swift test
