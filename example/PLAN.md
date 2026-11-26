@@ -1,8 +1,13 @@
 # example/: the message-rs demo app — implementation plan
 
-Status: planned 2026-11-26. Decisions settled with the user: a React Native app inside this
-repository (`example/`) that verifies **all three surfaces share one Rust registry** — JS
-publishes and Swift receives, Kotlin publishes and JS receives, and so on. Nothing built yet.
+**iOS result (2026-11-26): ALL PASS** — see `docs/ios-all-pass.png`. Five scenarios run on
+launch: JS→JS, JS→Swift, Swift→JS, shared pull (both ends read one store), Closed across
+languages (exactly once, pull empty afterwards). One Rust registry, verified at runtime.
+Android/Kotlin is the remaining half.
+
+Scope (settled with the user): a React Native app inside this repository that verifies **all
+three surfaces share one Rust registry**. Steps 0–2 are done for iOS; step 3's Android half and
+step 4/5 automation remain.
 
 ## Why our own demo (not jsi-rs's example)
 
@@ -101,6 +106,22 @@ configuration findings on the way:
 Remaining for step 0: prove it at runtime (Swift publishes, JS pulls the same bytes).
 
 This step is the real work; the app around it is scaffolding.
+
+## Runtime findings (iOS)
+
+- **Metro cannot resolve a `file:` symlinked package by default**: `metro.config.js` needs
+  `watchFolders: [repoRoot]` and both `nodeModulesPaths`, or it reports "Unable to resolve
+  module hub-turbo" although npm linked it.
+- The package's `main` must point at `index.ts` (the emitter layer), not the generated
+  `Hub.ts` — otherwise consumers get only the raw native interface.
+- RN 0.88 ships a **prebuilt** React framework with the Metro port compiled in, so
+  `RCT_METRO_PORT` cannot be changed by rebuilding. To use another port (another project's
+  Metro may own 8081), set the runtime override:
+  `simctl spawn <dev> defaults write <bundle-id> RCT_jsLocation -string 'localhost:8088'`.
+- Hermes has no `TextEncoder`; the scenarios use ASCII byte literals.
+- Reading results: `console.log` did not surface in Metro's terminal or the simulator log on
+  this setup — the UI (and a screenshot) is the reliable channel, which is why the app renders
+  every scenario's verdict.
 
 ## App shape (after step 0)
 
