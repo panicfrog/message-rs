@@ -313,5 +313,9 @@ distribution can wait.
   target removed every workaround (no bounded detached tasks, no polling instead of sinks).
   A caveat learned the hard way: a `Test` that subscribes must create the stream before the
   first publish — the hub is pure forwarding and never replays.
-- Next: M4 (`hub-jni` + Kotlin Flow wrapper), then M5 (`hub-turbo`).
+- Next: M4 (`hub-jni` + Kotlin Flow wrapper). The Swift superlib link-mode question (one Rust
+  copy shared with the jsi side) is deliberately deferred until jsi-rs lands: only its
+  compile-time half has been probed (bridge symbols typecheck in Swift without linking the
+  Rust library, so the wrapper compiles fine against headers alone); the final-link half needs
+  the real superlib aggregation to test against.
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.
