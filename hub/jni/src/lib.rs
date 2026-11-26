@@ -439,3 +439,8 @@ pub extern "system" fn Java_message_rs_hub_Hub_getNative(env: JNIEnv, c: JClass,
 pub extern "system" fn Java_message_rs_hub_Hub_copyBytes(env: JNIEnv, c: JClass, p: jlong, l: jint) -> jbyteArray {
     Java_message_rs_hub_Hub_00024Companion_copyBytes(env, c, p, l)
 }
+
+/// Force-link anchor: the JNI entry points are only called from the JVM, so an aggregate
+/// library needs an explicit reference to keep this crate's objects. See example/PLAN.md.
+#[unsafe(no_mangle)]
+pub extern "C" fn message_hub_jni_force_link() {}

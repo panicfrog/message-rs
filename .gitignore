@@ -640,3 +640,12 @@ fabric.properties
 # ---- message-rs hub ----
 # The xcframework is a build product of hub/swift/scripts/build-xcframework.sh
 hub/swift/Artifacts/
+
+# ---- example/ demo app ----
+example/node_modules/
+example/ios/Pods/
+example/ios/build/
+example/android/.gradle/
+example/android/app/build/
+example/android/build/
+example/vendor/

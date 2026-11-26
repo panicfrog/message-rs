@@ -4,6 +4,11 @@ description = "cxx bridge exposing the message-hub core to Swift (and any C++ ca
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# `links` lets cxx-build in an aggregate crate (a React Native app's superlib) discover this
+# bridge and compile its C++ glue into that crate's own build — without it the Rust symbols
+# survive but the `message_hub::` C++ entry points Swift calls are missing at link time.
+links = "hub-ffi"
+
 
 [dependencies]
 message-hub = { path = "../" }

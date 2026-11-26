@@ -132,6 +132,17 @@ impl Hub {
     }
 }
 
+// Keep the platform's native surface alive in the aggregate library: nothing in Rust calls
+// those entry points (Swift/C++ and the JVM do), so without an explicit reference the linker
+// drops their objects and the other ends find no symbols. See example/PLAN.md.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[used]
+static KEEP_NATIVE_SURFACE: extern "C" fn() = hub_ffi::message_hub_ffi_force_link;
+
+#[cfg(target_os = "android")]
+#[used]
+static KEEP_NATIVE_SURFACE: extern "C" fn() = hub_jni::message_hub_jni_force_link;
+
 // `get` returns only the buffer; the kind travels through this cell (read by `getKind`).
 thread_local! {
     static LAST_KIND: std::cell::Cell<f64> = const { std::cell::Cell::new(-1.0) };

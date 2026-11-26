@@ -71,8 +71,24 @@ Both surfaces now have their superlib mode, verified locally:
 - **Kotlin**: `-Dhub.libName=rust_app` loads the aggregate superlib instead of `hub_jni`;
   default unchanged (9 tests pass).
 
-Remaining for step 0: prove it end-to-end in the demo app (one registry, cross-language
-delivery), which needs the app itself.
+Two link-level traps found and fixed while building the demo's superlib (both would have
+shown up as "Swift finds no symbols" at app link time):
+
+1. **Dead-code elimination**: nothing in Rust calls the bridge/JNI entry points (Swift and the
+   JVM do), so the linker dropped those objects. Each surface now exports a force-link anchor
+   (`message_hub_ffi_force_link` / `message_hub_jni_force_link`) that `hub-turbo` references via
+   a `#[used]` static — the same trick jsi-turbo's macros use for module anchors.
+2. **cxx glue lives in the aggregate's build**: the Rust symbols survived but the
+   `message_hub::` C++ entry points did not. `hub-ffi` needs `links = "hub-ffi"` in
+   `[package]` so cxx-build inside the superlib discovers the bridge and compiles its C++ glue
+   there (jsi-sys does the same with `links = "jsi"`).
+
+Verified on the demo app's iOS-simulator superlib: exactly one `Hub::shared::SHARED`, 21
+`message_hub` C++ symbols (shared_ptr/subscribe/publish/get all present), and the Hub turbo
+force anchor defined.
+
+Remaining for step 0: prove it end-to-end at runtime (Swift publishes, JS pulls the same
+bytes), which needs the native module wired into the app.
 
 This step is the real work; the app around it is scaffolding.
 
