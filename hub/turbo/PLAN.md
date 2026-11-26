@@ -1,7 +1,7 @@
 # M5: hub-turbo (RN / JS surface) — implementation plan
 
-Status: steps 1, 2 and the typecheck of 4 are done (2026-11-26); what remains is 3
-(in-app conformance) and 5 (CI wiring). Findings recorded below.
+Status: steps 1, 2, 4 and 5 are done (2026-11-26); only step 3 (in-app conformance on a
+running RN app) remains. Findings recorded below.
 
 ## Shape
 
@@ -61,7 +61,12 @@ TS, in the package):
   deps through the npm symlink's literal directory, not the link target. A published version
   replaces this with a crates.io dependency.
 - The TS layer (`index.ts`: channel/pull/publish/publisher handles) typechecks standalone
-  (`types.d.ts` declares the `require` the generated bootstrap uses).
+  (`types.d.ts` declares the `require` the generated bootstrap uses) and has 5 vitest tests
+  against a fake native module modelling the core's semantics: wake-up + pull, handle routing,
+  Closed once with subscription revival, unknown-handle publish returning false, and the Rust
+  message vector byte-for-byte.
+- The superlib really registers the module: `nm librust_app.a` shows `___jsi_turbo_force_hub`
+  defined in a hub_turbo object, exactly like the demo's ticker/turbo_demo anchors.
 - API shapes that fell out of the macro's constraints: `get` returns the ArrayBuffer alone
   (JsiArrayBuffer is not serde-serializable, so it cannot sit in a TurboStruct); the kind
   rides a thread-local read by the `kind` getter right after. `publish` routes through a
