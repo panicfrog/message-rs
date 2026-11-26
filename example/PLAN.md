@@ -87,8 +87,18 @@ Verified on the demo app's iOS-simulator superlib: exactly one `Hub::shared::SHA
 `message_hub` C++ symbols (shared_ptr/subscribe/publish/get all present), and the Hub turbo
 force anchor defined.
 
-Remaining for step 0: prove it end-to-end at runtime (Swift publishes, JS pulls the same
-bytes), which needs the native module wired into the app.
+**The iOS app builds** (`BUILD SUCCEEDED`, simulator): the Swift surface compiles in superlib
+mode — headers only, no xcframework — and links against the superlib's symbols. Three
+configuration findings on the way:
+
+- The pod must use **C++20**, not C++17: RN 0.88's headers use concepts (`requires`), and a
+  c++17 setting on our pod broke the React Clang module for the whole target.
+- CocoaPods ignores `source_files` pointing outside the pod directory; the wrapper sources are
+  **symlinked** into `ios/HubNative/wrapper/` so there is still one source of truth.
+- The wrapper does `import MessageHubCxx`, so the pod ships a `module.modulemap` giving that
+  name to the cxxbridge header, with `SWIFT_INCLUDE_PATHS` at the pod root.
+
+Remaining for step 0: prove it at runtime (Swift publishes, JS pulls the same bytes).
 
 This step is the real work; the app around it is scaffolding.
 
