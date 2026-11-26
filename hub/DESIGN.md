@@ -313,9 +313,20 @@ distribution can wait.
   target removed every workaround (no bounded detached tasks, no polling instead of sinks).
   A caveat learned the hard way: a `Test` that subscribes must create the stream before the
   first publish — the hub is pure forwarding and never replays.
-- Next: M4 (`hub-jni` + Kotlin Flow wrapper). The Swift superlib link-mode question (one Rust
-  copy shared with the jsi side) is deliberately deferred until jsi-rs lands: only its
-  compile-time half has been probed (bridge symbols typecheck in Swift without linking the
-  Rust library, so the wrapper compiles fine against headers alone); the final-link half needs
-  the real superlib aggregation to test against.
+- M4's Rust side is in place: `hub/jni/` (crate `hub-jni`, a workspace member) exposes 14
+  `Java_message_rs_hub_Hub_00024Companion_*` symbols — all native methods Kotlin declares live
+  on `Hub.Companion`, so the JVM names are stable. Callbacks are `GlobalRef`s with a
+  pre-looked-up `onEvent(JIJI)V`; schedulers are `GlobalRef`s with `schedule(J)V` that must
+  call `runJob(jobCtx)` exactly once per job (the job frees itself as part of running). The
+  host-JVM conformance test (`tests/jni_java.rs` + `tests/java/`) drives a Java twin of the
+  wrapper through `cargo test -p hub-jni`: push/pull, no replay, Closed, scheduled delivery
+  on an executor thread, the shared registry and unsubscribe all pass; `cargo ndk` builds the
+  Android cdylib with the same symbols. The Kotlin wrapper itself (`hub/kotlin/`) carries the
+  plan and the sources: `Hub`, `Publisher`, `Subscription`, `ValueKind`/`Value`, with
+  `ExecutorScheduler` as the dispatch adapter — it still needs a Gradle module and device-level
+  conformance (M4's remaining half).
+- The Swift superlib link-mode question (one Rust copy shared with the jsi side) is deferred
+  until jsi-rs lands: only its compile-time half has been probed (bridge symbols typecheck in
+  Swift without linking the Rust library); the final-link half needs the real superlib
+  aggregation to test against.
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.

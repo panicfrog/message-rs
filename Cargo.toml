@@ -8,6 +8,7 @@ members = [
     "protocol/playground",
     "hub",
     "hub/ffi",
+    "hub/jni",
 ]
 
 [workspace.package]

@@ -1,0 +1,14 @@
+[package]
+name = "hub-jni"
+description = "JNI surface of the message-hub core for Kotlin (Android)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+message-hub = { path = "../" }
+jni = "0.21"
+
+[lib]
+name = "hub_jni"
+crate-type = ["cdylib", "rlib"]
