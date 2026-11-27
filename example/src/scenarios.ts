@@ -22,11 +22,6 @@ function bytesOf(buf: ArrayBuffer): number[] {
   return Array.from(new Uint8Array(buf));
 }
 
-/** ASCII only (Hermes has no TextEncoder); enough to prove byte identity across languages. */
-function ascii(s: string): number[] {
-  return Array.from(s).map((c) => c.charCodeAt(0));
-}
-
 function eq(a: number[], b: number[]): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
@@ -104,11 +99,11 @@ async function swiftToJs(): Promise<Result> {
 async function sharedPull(): Promise<Result> {
   if (!native) return { name: 'shared pull', ok: false, detail: 'HubNative module missing' };
   const id = 9004;
-  const handle = await native.publishFromNative(id, ValueKind.STRING, ascii('from native'));
+  const handle = await native.publishFromNative(id, ValueKind.STRING, Array.from(new TextEncoder().encode('from native')));
   try {
     const jsPulled = pull(id);
     const nativePulled = await native.pullFromNative(id);
-    const expected = ascii('from native');
+    const expected = Array.from(new TextEncoder().encode('from native'));
     const ok = !!jsPulled && eq(bytesOf(jsPulled), expected) && !!nativePulled && eq(nativePulled.bytes, expected);
     return {
       name: 'shared pull',
@@ -138,9 +133,26 @@ async function closedAcross(): Promise<Result> {
   }
 }
 
+
+/** Reports what this runtime provides (the ASCII helper's premise, checked not assumed). */
+async function runtimeGlobals(): Promise<Result> {
+  const g = globalThis as Record<string, unknown>;
+  const has = (k: string) => typeof g[k] !== 'undefined';
+  let encWorks = false;
+  try {
+    const E = g.TextEncoder as (new () => { encode(s: string): Uint8Array }) | undefined;
+    if (E) encWorks = Array.from(new E().encode('hi')).join(',') === '104,105';
+  } catch { /* reported below */ }
+  return {
+    name: 'runtime globals',
+    ok: true,
+    detail: `TextEncoder=${has('TextEncoder')} works=${encWorks} TextDecoder=${has('TextDecoder')}`,
+  };
+}
+
 export async function runAll(): Promise<Result[]> {
   const out: Result[] = [];
-  for (const scenario of [jsToJs, jsToSwift, swiftToJs, sharedPull, closedAcross]) {
+  for (const scenario of [jsToJs, jsToSwift, swiftToJs, sharedPull, closedAcross, runtimeGlobals]) {
     try {
       out.push(await scenario());
     } catch (e) {

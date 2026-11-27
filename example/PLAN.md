@@ -119,7 +119,10 @@ This step is the real work; the app around it is scaffolding.
   `RCT_METRO_PORT` cannot be changed by rebuilding. To use another port (another project's
   Metro may own 8081), set the runtime override:
   `simctl spawn <dev> defaults write <bundle-id> RCT_jsLocation -string 'localhost:8088'`.
-- Hermes has no `TextEncoder`; the scenarios use ASCII byte literals.
+- Hermes **does** provide `TextEncoder`/`TextDecoder` on RN 0.88 — verified in-app (the demo's
+  "runtime globals" check reports `TextEncoder=true works=true`). The earlier assumption that it
+  was missing came from reading a *type* error (`Cannot find name 'TextEncoder'`) as a runtime
+  limit; RN's types simply do not declare them, so `src/globals.d.ts` adds the minimal surface.
 - Reading results: `console.log` did not surface in Metro's terminal or the simulator log on
   this setup — the UI (and a screenshot) is the reliable channel, which is why the app renders
   every scenario's verdict.
