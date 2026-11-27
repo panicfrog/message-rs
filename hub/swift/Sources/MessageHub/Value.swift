@@ -22,7 +22,7 @@ public enum ValueKind: UInt8 {
 }
 
 /// A decoded hub value (the mirror of `message_hub::Value`).
-public enum Value {
+public enum Value: Equatable {
     case bool(Bool)
     case u8(UInt8)
     case i8(Int8)

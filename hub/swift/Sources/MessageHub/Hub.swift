@@ -24,6 +24,14 @@ final class SchedulerBox {
 
 /// One registry. The process-wide instance is `Hub.shared`.
 public final class Hub {
+    fileprivate struct HandleKey: Hashable {
+        let id: UInt32
+        let kind: ValueKind
+    }
+
+    /// Per-(id, kind) publisher handles for the value-first `publish(id:_:)`.
+    fileprivate var handles: [HandleKey: Publisher] = [:]
+
     /// Every end of the process shares this instance: a Swift subscriber sees a Kotlin publisher.
     public static let shared = Hub(raw: message_hub.shared_ptr()!)
 
@@ -162,6 +170,40 @@ extension Hub {
             sub = message_hub.subscribe(hubPtr, id, cbPtr, ctxPtr, dropPtr)!
         }
         return Subscription(raw: sub, box: box)
+    }
+
+    /// Publishes a value to `id`; the wire kind follows from the Swift type, so callers never
+    /// name a `ValueKind`: `publish(id: 1, UInt16(65535))`, `publish(id: 2, "hi")`.
+    /// Use `MessageBytes(payload)` for a message-rs encoding.
+    ///
+    /// Publisher handles are managed per (id, kind): publishing a different kind to the same id
+    /// closes the previous publisher first (a publisher is a source of exactly one type).
+    public func publish(id: UInt32, _ value: some HubValue) {
+        let v = value.hubValue
+        let key = HandleKey(id: id, kind: v.kind)
+        if handles[key] == nil {
+            for (k, p) in handles where k.id == id && k.kind != v.kind {
+                p.close()
+                handles.removeValue(forKey: k)
+            }
+            handles[key] = Publisher(hub: self, id: id, kind: v.kind)
+        }
+        handles[key]?.publish(v.encode())
+    }
+
+    /// Ends publishing to `id`: subscribers get Closed once and pull goes empty. Idempotent.
+    public func close(id: UInt32) {
+        for (k, p) in handles where k.id == id {
+            p.close()
+            handles.removeValue(forKey: k)
+        }
+    }
+
+    /// The newest value of `id`, decoded: a Swift value for the basic kinds, `[UInt8]` for
+    /// BYTES/MESSAGE. Nil when nothing is published (or the last publisher closed).
+    public func pull(id: UInt32) -> Value? {
+        guard let (kind, bytes) = get(id: id) else { return nil }
+        return try? Value.decode(kind, bytes)
     }
 
     /// The newest value of `id`: `(kind, bytes)`, or nil when nothing is published (or the last

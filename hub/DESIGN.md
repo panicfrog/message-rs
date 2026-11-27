@@ -243,6 +243,12 @@ CI covers every surface: `cargo test --workspace` (core + the JNI Java twin), `h
 gradlew test with -PhubLibDir), `hub-turbo` (tsc + vitest on the emitter layer). The RN app
 build itself stays out of CI — it needs pods/NDK and a running app.
 
+All three surfaces are value-first: Swift `publish(id:, UInt16(65535))` / `pull(id:)`, Kotlin
+`publish(1, 65535.toUShort())` / `pull(1)`, JS `publish(id, u16(65535))` / `pull(id)`. Swift and
+Kotlin need no wrappers at all — their type systems distinguish `UInt16` from `Int32` from
+`Double`, so the kind follows the type exactly (`HubValue` / `hubValueOf`); `MessageBytes` marks
+a message-rs payload on both. Handles are managed per (id, kind) internally on every end.
+
 The wire kind is an implementation detail, not part of the API. JS callers write
 `publish(id, 65535)` or `publish(id, u16(65535))`, `pull(id)`, `close(id)` — no handles and no
 `ValueKind` at the call site. Plain values map by a fixed rule (boolean→BOOL, string→STRING,

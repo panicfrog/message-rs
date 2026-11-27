@@ -105,6 +105,40 @@ class Hub private constructor(
         fun create(): Hub = Hub(createHandle(), owned = true)
     }
 
+    /**
+     * Publishes a value to [id]; the wire kind follows from the Kotlin type, so callers never
+     * name a [ValueKind]: `publish(1, 65535.toUShort())`, `publish(2, "hi")`. Use
+     * [MessageBytes] for a message-rs encoding.
+     *
+     * Publisher handles are managed per (id, kind): publishing a different kind to the same id
+     * closes the previous publisher first (a publisher is a source of exactly one type).
+     */
+    fun publish(id: Long, value: Any) {
+        val v = hubValueOf(value)
+        val key = id to v.kind
+        if (handles[key] == null) {
+            handles.keys.filter { it.first == id && it.second != v.kind }.forEach {
+                handles.remove(it)?.close()
+            }
+            handles[key] = publisher(id, v.kind)
+        }
+        handles.getValue(key).publish(v.encode())
+    }
+
+    /** Ends publishing to [id]: subscribers get Closed once and pull goes empty. Idempotent. */
+    fun close(id: Long) {
+        handles.keys.filter { it.first == id }.forEach { handles.remove(it)?.close() }
+    }
+
+    private val handles = HashMap<Pair<Long, ValueKind>, Publisher>()
+
+    /** The newest value of [id], decoded; null when nothing is published or the last publisher closed. */
+    fun pull(id: Long): Value? {
+        val pulled = get(id) ?: return null
+        val kind = pulled.kind ?: return null
+        return runCatching { Value.decode(kind, pulled.bytes) }.getOrNull()
+    }
+
     /** Publishes one `(id, kind)`; a source of exactly one type. */
     fun publisher(id: Long, kind: ValueKind): Publisher {
         val h = createPublisher(handle, id, kind.raw)
