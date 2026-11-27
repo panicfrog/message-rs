@@ -1,12 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 // The generated accessor bootstraps through react-native's TurboModuleRegistry; in tests the
-// native module is a fake driven by the real Rust core semantics (a small in-memory model).
-// This pins the emitter layer's contract: wake-up + pull, handle routing, Closed delivery.
-type Event = { kind: number; bytes: number[] | null; closed: boolean };
+// native module is a fake modelling the Rust core's semantics. This pins the user-facing
+// contract: publish(id, value), pull returning values, Closed, and kind inference.
+type NativeEvent = { kind: number; bytes: number[] | null; closed: boolean };
+type Channel = { id: number; kind: number; closed: boolean; value: unknown; bytes?: Uint8Array };
 
 interface FakeNative {
-  subscribe(id: number, cb: (e: Event) => void): number;
+  subscribe(id: number, cb: (e: NativeEvent) => void): number;
   unsubscribe(subId: number): void;
   publish(handle: number, data: ArrayBuffer): void;
   get(id: number): ArrayBuffer;
@@ -16,9 +17,9 @@ interface FakeNative {
 }
 
 /** A minimal stand-in for the Rust hub: same push/pull/Closed semantics as the core. */
-function makeFake(): FakeNative & { fire(id: number, bytes: number[]): void } {
-  const subs = new Map<number, { id: number; cb: (e: Event) => void }>();
-  const pubs = new Map<number, { id: number; kind: number; closed: boolean }>();
+function makeFake(): FakeNative {
+  const subs = new Map<number, { id: number; cb: (e: NativeEvent) => void }>();
+  const pubs = new Map<number, { id: number; kind: number }>();
   const last = new Map<number, { kind: number; bytes: Uint8Array }>();
   let nextSub = 1;
   let nextPub = 1;
@@ -35,12 +36,12 @@ function makeFake(): FakeNative & { fire(id: number, bytes: number[]): void } {
     },
     createPublisher(id, kind) {
       const h = nextPub++;
-      pubs.set(h, { id, kind, closed: false });
+      pubs.set(h, { id, kind });
       return h;
     },
     publish(handle, data) {
       const p = pubs.get(handle);
-      if (!p || p.closed) throw new Error(`unknown publisher handle ${handle}`);
+      if (!p) throw new Error(`unknown publisher handle ${handle}`);
       const bytes = new Uint8Array(data);
       last.set(p.id, { kind: p.kind, bytes });
       for (const s of subs.values()) {
@@ -51,8 +52,7 @@ function makeFake(): FakeNative & { fire(id: number, bytes: number[]): void } {
       const p = pubs.get(handle);
       if (!p) return;
       pubs.delete(handle);
-      // Closed fires when this was the id's last live publisher
-      const stillLive = [...pubs.values()].some((q) => q.id === p.id && !q.closed);
+      const stillLive = [...pubs.values()].some((q) => q.id === p.id);
       if (!stillLive) {
         last.delete(p.id);
         for (const s of subs.values()) {
@@ -68,91 +68,114 @@ function makeFake(): FakeNative & { fire(id: number, bytes: number[]): void } {
     get kind() {
       return lastKind;
     },
-    fire(id, bytes) {
-      for (const s of subs.values()) {
-        if (s.id === id) s.cb({ kind: 12, bytes, closed: false });
-      }
-    },
   };
 }
 
-let fake: ReturnType<typeof makeFake>;
+let fake: FakeNative;
 
-vi.mock('../generated/rust-turbo/Hub', () => ({
-  getHub: () => fake,
-}));
+vi.mock('../generated/rust-turbo/Hub', () => ({ getHub: () => fake }));
 
-// Imported after the mock so the emitter binds to the fake.
-const emitter = await import('../index');
+const hub = await import('../index');
 
 beforeEach(() => {
   fake = makeFake();
 });
 
-describe('hub-turbo emitter layer', () => {
-  it('channel delivers events and the returned function unsubscribes', () => {
-    const seen: Event[] = [];
-    const off = emitter.channel(1, (e) => seen.push(e));
-    const h = emitter.createPublisher(1, emitter.ValueKind.BYTES);
-    emitter.publish(h, new Uint8Array([1, 2, 3]).buffer);
+describe('value-first API', () => {
+  it('publishes plain values and pulls them back decoded', () => {
+    hub.publish(1, true);
+    expect(hub.pull(1)).toBe(true);
+    hub.publish(2, 'hi');
+    expect(hub.pull(2)).toBe('hi');
+    hub.publish(3, 1.5);
+    expect(hub.pull(3)).toBe(1.5); // number defaults to f64
+    hub.publish(4, 42n);
+    expect(hub.pull(4)).toBe(42n); // bigint defaults to i64
+    hub.publish(5, new Uint8Array([1, 2, 3]));
+    expect(Array.from(hub.pull(5) as Uint8Array)).toEqual([1, 2, 3]);
+  });
+
+  it('honours explicit widths through the wrappers', () => {
+    hub.publish(10, hub.u16(65535));
+    expect(hub.pullRaw(10)!.kind).toBe(hub.ValueKind.U16);
+    expect(hub.pull(10)).toBe(65535);
+    hub.publish(11, hub.i32(-1));
+    expect(hub.pullRaw(11)!.kind).toBe(hub.ValueKind.I32);
+    expect(hub.pull(11)).toBe(-1);
+    hub.publish(12, hub.u64(18446744073709551615n));
+    expect(hub.pull(12)).toBe(18446744073709551615n);
+    hub.publish(13, hub.f32(1.5));
+    expect(hub.pullRaw(13)!.kind).toBe(hub.ValueKind.F32);
+  });
+
+  it('channel delivers decoded values, and the returned function unsubscribes', () => {
+    const seen: Channel[] = [];
+    const off = hub.channel(20, (e) => seen.push(e));
+    hub.publish(20, 'hello');
     expect(seen).toHaveLength(1);
-    expect(seen[0].bytes).toEqual([1, 2, 3]);
+    expect(seen[0].value).toBe('hello');
     expect(seen[0].closed).toBe(false);
-
     off();
-    emitter.publish(h, new Uint8Array([4]).buffer);
+    hub.publish(20, 'again');
     expect(seen).toHaveLength(1);
   });
 
-  it('pull returns the newest payload zero-copy-shaped and null when absent', () => {
-    expect(emitter.pull(9)).toBeNull();
-    const h = emitter.createPublisher(9, emitter.ValueKind.STRING);
-    emitter.publish(h, new TextEncoder().encode('hi').buffer);
-    const got = emitter.pull(9);
-    expect(got).not.toBeNull();
-    expect(new TextDecoder().decode(got!)).toBe('hi');
-    expect(emitter.lastKind()).toBe(emitter.ValueKind.STRING);
-  });
-
-  it('Closed arrives once when the last publisher closes; the subscription survives', () => {
-    const seen: Event[] = [];
-    emitter.channel(2, (e) => seen.push(e));
-    const a = emitter.createPublisher(2, emitter.ValueKind.BYTES);
-    const b = emitter.createPublisher(2, emitter.ValueKind.BYTES);
-    emitter.publish(a, new Uint8Array([1]).buffer);
-    emitter.closePublisher(a);
-    expect(seen.filter((e) => e.closed)).toHaveLength(0); // b is still live
-    emitter.closePublisher(b);
+  it('close delivers Closed once and empties the pull', () => {
+    const seen: Channel[] = [];
+    hub.channel(21, (e) => seen.push(e));
+    hub.publish(21, 1);
+    hub.close(21);
     expect(seen.filter((e) => e.closed)).toHaveLength(1);
-    expect(emitter.pull(2)).toBeNull();
-
-    // a new publisher reaches the surviving subscription again
-    const c = emitter.createPublisher(2, emitter.ValueKind.BYTES);
-    emitter.publish(c, new Uint8Array([7]).buffer);
-    expect(seen.filter((e) => !e.closed)).toHaveLength(2);
+    expect(hub.pull(21)).toBeNull();
+    hub.close(21); // idempotent
+    expect(seen.filter((e) => e.closed)).toHaveLength(1);
   });
 
-  it('publish reports an unknown handle as false instead of throwing', () => {
-    expect(emitter.publish(999, new ArrayBuffer(2))).toBe(false);
-    const h = emitter.createPublisher(3, emitter.ValueKind.BYTES);
-    expect(emitter.publish(h, new Uint8Array([1]).buffer)).toBe(true);
-    emitter.closePublisher(h);
-    expect(emitter.publish(h, new Uint8Array([1]).buffer)).toBe(false);
+  it('a subscription survives Closed and sees a new publisher', () => {
+    const seen: Channel[] = [];
+    hub.channel(22, (e) => seen.push(e));
+    hub.publish(22, 'first');
+    hub.close(22);
+    hub.publish(22, 'second');
+    expect(seen.map((e) => e.value)).toEqual(['first', null, 'second']);
   });
 
-  it('the message vector passes through byte-for-byte', async () => {
+  it('changing the kind on an id supersedes the previous publisher', () => {
+    hub.publish(23, hub.u16(1));
+    expect(hub.pullRaw(23)!.kind).toBe(hub.ValueKind.U16);
+    hub.publish(23, 'now a string');
+    expect(hub.pullRaw(23)!.kind).toBe(hub.ValueKind.STRING);
+    expect(hub.pull(23)).toBe('now a string');
+  });
+
+  it('passes the Rust message vector through byte-for-byte', async () => {
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
     const vector = JSON.parse(
       readFileSync(resolve(__dirname, '../../../vectors/user.json'), 'utf8'),
     ) as { hex: string; key: number };
-    const bytes = Uint8Array.from(
-      (vector.hex.match(/../g) ?? []).map((b) => parseInt(b, 16)),
-    );
-    const h = emitter.createPublisher(vector.key, emitter.ValueKind.MESSAGE);
-    emitter.publish(h, bytes.buffer);
-    const got = new Uint8Array(emitter.pull(vector.key)!);
-    expect(Array.from(got)).toEqual(Array.from(bytes));
-    expect(emitter.lastKind()).toBe(emitter.ValueKind.MESSAGE);
+    const bytes = Uint8Array.from((vector.hex.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+    hub.publish(vector.key, hub.message(bytes));
+    expect(Array.from(hub.pull(vector.key) as Uint8Array)).toEqual(Array.from(bytes));
+    expect(hub.pullRaw(vector.key)!.kind).toBe(hub.ValueKind.MESSAGE);
+  });
+});
+
+describe('generics are a compile-time hint only', () => {
+  it('decodes by the sender kind regardless of the type argument', () => {
+    // The publisher sent a u16; asking for a string does not change what comes back.
+    hub.publish(30, hub.u16(65535));
+    const asString = hub.pull<string>(30);
+    expect(typeof asString).toBe('number');
+    expect(asString as unknown as number).toBe(65535);
+    expect(hub.pullRaw(30)!.kind).toBe(hub.ValueKind.U16);
+  });
+
+  it('channel events carry the real kind even with a narrower hint', () => {
+    const seen: { kind: number; value: unknown }[] = [];
+    hub.channel<boolean>(31, (e) => { if (!e.closed) seen.push({ kind: e.kind, value: e.value }); });
+    hub.publish(31, 'a string, not a bool');
+    expect(seen[0].kind).toBe(hub.ValueKind.STRING);
+    expect(seen[0].value).toBe('a string, not a bool');
   });
 });

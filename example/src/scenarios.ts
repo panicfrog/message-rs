@@ -6,10 +6,13 @@
  */
 
 import { NativeModules, NativeEventEmitter } from 'react-native';
-import { channel, pull, createPublisher, closePublisher, publish, ValueKind, CLOSED_KIND } from 'hub-turbo';
+import { channel, pull, pullRaw, publish, close, u16, message, ValueKind, CLOSED_KIND } from 'hub-turbo';
 
 export type Result = { name: string; ok: boolean; detail: string };
 
+// TEST PROBE, not the product API. `HubNative` exists only so a check can observe what the
+// native side received: it reports raw bytes back to JS for assertions. Real callers use
+// hub-turbo's publish(id, value) / pull(id) / channel(id, handler) — never these methods.
 const native = NativeModules.HubNative as {
   publishFromNative(id: number, kind: number, bytes: number[]): Promise<number>;
   closePublisher(handle: number): void;
@@ -18,8 +21,8 @@ const native = NativeModules.HubNative as {
   pullFromNative(id: number): Promise<{ kind: number; bytes: number[] } | null>;
 } | undefined;
 
-function bytesOf(buf: ArrayBuffer): number[] {
-  return Array.from(new Uint8Array(buf));
+function bytesOf(b: Uint8Array): number[] {
+  return Array.from(b);
 }
 
 function eq(a: number[], b: number[]): boolean {
@@ -40,14 +43,13 @@ async function until(cond: () => boolean, ms = 3000): Promise<boolean> {
 async function jsToJs(): Promise<Result> {
   const id = 9001;
   const seen: number[][] = [];
-  const off = channel(id, (e) => { if (!e.closed && e.bytes) seen.push(e.bytes); });
+  const off = channel(id, (e) => { if (!e.closed && e.value) seen.push(Array.from(e.value as Uint8Array)); });
   try {
-    const h = createPublisher(id, ValueKind.BYTES);
-    publish(h, new Uint8Array([1, 2, 3]).buffer);
+    publish(id, new Uint8Array([1, 2, 3]));
     const arrived = await until(() => seen.length >= 1);
-    const pulled = pull(id);
-    const ok = arrived && eq(seen[0], [1, 2, 3]) && !!pulled && eq(bytesOf(pulled), [1, 2, 3]);
-    closePublisher(h);
+    const pulled = pull(id) as Uint8Array | null;
+    const ok = arrived && eq(seen[0], [1, 2, 3]) && !!pulled && eq(Array.from(pulled), [1, 2, 3]);
+    close(id);
     return { name: 'JS → JS', ok, detail: ok ? 'event + pull match' : `seen=${JSON.stringify(seen)} pull=${pulled ? bytesOf(pulled) : null}` };
   } finally {
     off();
@@ -66,11 +68,10 @@ async function jsToSwift(): Promise<Result> {
   });
   const subHandle = await native.subscribeFromNative(id);
   try {
-    const h = createPublisher(id, ValueKind.BYTES);
-    publish(h, new Uint8Array([7, 8, 9]).buffer);
+    publish(id, new Uint8Array([7, 8, 9]));
     const arrived = await until(() => seen.length >= 1);
     const ok = arrived && eq(seen[0], [7, 8, 9]);
-    closePublisher(h);
+    close(id);
     return { name: 'JS → native', ok, detail: ok ? 'the native side saw the JS bytes' : `native saw ${JSON.stringify(seen)}` };
   } finally {
     listener.remove();
@@ -83,7 +84,7 @@ async function swiftToJs(): Promise<Result> {
   if (!native) return { name: 'native → JS', ok: false, detail: 'HubNative module missing' };
   const id = 9003;
   const seen: number[][] = [];
-  const off = channel(id, (e) => { if (!e.closed && e.bytes) seen.push(e.bytes); });
+  const off = channel(id, (e) => { if (!e.closed && e.value) seen.push(Array.from(e.value as Uint8Array)); });
   try {
     const handle = await native.publishFromNative(id, ValueKind.BYTES, [4, 5, 6]);
     const arrived = await until(() => seen.length >= 1);
@@ -101,14 +102,15 @@ async function sharedPull(): Promise<Result> {
   const id = 9004;
   const handle = await native.publishFromNative(id, ValueKind.STRING, Array.from(new TextEncoder().encode('from native')));
   try {
+    // JS gets the decoded string; the native side reports its own decoded bytes.
     const jsPulled = pull(id);
     const nativePulled = await native.pullFromNative(id);
     const expected = Array.from(new TextEncoder().encode('from native'));
-    const ok = !!jsPulled && eq(bytesOf(jsPulled), expected) && !!nativePulled && eq(nativePulled.bytes, expected);
+    const ok = jsPulled === 'from native' && !!nativePulled && eq(nativePulled.bytes, expected);
     return {
       name: 'shared pull',
       ok,
-      detail: ok ? 'both ends read the same store' : `js=${jsPulled ? bytesOf(jsPulled) : null} native=${nativePulled?.bytes ?? null}`,
+      detail: ok ? 'both ends read the same store' : `js=${JSON.stringify(jsPulled)} native=${nativePulled?.bytes ?? null}`,
     };
   } finally {
     native.closePublisher(handle);

@@ -243,6 +243,24 @@ CI covers every surface: `cargo test --workspace` (core + the JNI Java twin), `h
 gradlew test with -PhubLibDir), `hub-turbo` (tsc + vitest on the emitter layer). The RN app
 build itself stays out of CI — it needs pods/NDK and a running app.
 
+The wire kind is an implementation detail, not part of the API. JS callers write
+`publish(id, 65535)` or `publish(id, u16(65535))`, `pull(id)`, `close(id)` — no handles and no
+`ValueKind` at the call site. Plain values map by a fixed rule (boolean→BOOL, string→STRING,
+bigint→I64, Uint8Array→BYTES, number→F64); the wrappers (`u8`…`f64`, `message`) pin an exact
+width. Value-range guessing was rejected: it would change the wire format as values change and
+break cross-language decoding. Publisher handles are managed per (id, kind) internally.
+
+`pull<T>(id)` / `channel<T>(id, h)` take a **compile-time hint only**: `as T` erases at runtime,
+so the value is always the decoding of the sender's real kind. Declaring `pull<string>` on an id
+holding a u16 still yields the number — the hint saves a narrowing step, it never converts or
+validates. Two tests pin this.
+
+Decoding is the surface's job, not the caller's: the kind is known, so basic types arrive as
+values on every end — Swift/Kotlin `Value.decode`, JS `pull()` returning boolean/number/bigint/
+string and `channel()` events carrying `value`. Only `MESSAGE` stays binary (it needs the
+generated schema); `pullRaw()` remains for byte-level work. The JS side used to hand back raw
+bytes plus a separate `lastKind()`, which pushed a DataView onto every call site — fixed.
+
 One Rust copy per process (the demo's prerequisite, see example/PLAN.md): each surface used to
 ship its own core, and symbol inspection showed three distinct `Hub::shared::SHARED` statics
 with different crate hashes — the linker never coalesces them, so the ends could not see each
