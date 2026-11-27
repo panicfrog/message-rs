@@ -124,6 +124,16 @@ A data item is `(id: u32, kind: ValueKind, payload: bytes)`, owned by a publishe
   `Weak` reference to the hub, so using or dropping them after the hub is harmless. Ends with
   nondeterministic destruction (Kotlin) must expose `close()` and call it from their lifecycle
   (`ViewModel.onCleared`), otherwise pull outlives the object.
+- **The wrapper handle must retain its owning hub** (found 2026-11-27 through a flaky Kotlin CI
+  failure). The core's `Weak` makes *using* a handle after the hub safe, but an isolated
+  `Hub`/`Hub.create()` frees the whole registry when its wrapper is collected — and the JVM's
+  liveness analysis lets that happen **mid-method**, as soon as the caller stops reading the
+  variable, not only after it returns. Every later publish then silently becomes a no-op
+  (`Weak::upgrade` fails). So Swift's `Publisher`/`Subscription` hold a strong `hub`, Kotlin's
+  hold a `Hub` field, and `HubEventFlow` holds its `Subscription` (nothing else referenced it).
+  Regression tests on both ends force collection while the handles are live; each fails when
+  the anchor is weakened. Symptom to recognise: deliveries stop with no error, and `finalize`
+  logging shows *other* ids being collected at that moment.
 
 ## 5. Core API (crate `message-hub`, dir `hub/`, zero dependencies)
 

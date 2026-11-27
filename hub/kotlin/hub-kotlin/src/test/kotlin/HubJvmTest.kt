@@ -158,41 +158,75 @@ class HubJvmTest {
 
 
     @Test
-    fun `probe minimal single publish`() = runBlocking {
-        val hub = hub()
-        val p = hub.publisher(60, ValueKind.STRING)
-        var calls = 0
-        val s = hub.subscribeOn(60, Executors.newSingleThreadExecutor()) { id, kind, ptr, len ->
-            calls++
-            println("PROBE call# " + calls + " kind=" + kind + " ptr=" + ptr + " len=" + len)
+    fun `handles keep their registry alive after the hub reference dies`() {
+        // The Rust handles hold only a Weak to the registry, and an owned Hub frees it in its
+        // finalizer. The JVM's liveness analysis lets it collect `hub` as soon as the caller
+        // stops reading the variable — mid-method, not just after return. Publisher/Subscription
+        // must therefore retain the Hub themselves, or publishes silently become no-ops.
+        val p: Publisher
+        val s: Subscription
+        val got = java.util.concurrent.atomic.AtomicInteger(0)
+        run {
+            val hub = hub()
+            p = hub.publisher(70, ValueKind.STRING)
+            s = hub.subscribe(70) { _, kind, _, _ -> if (kind != CLOSED_KIND) got.incrementAndGet() }
         }
-        kotlinx.coroutines.delay(100)
-        p.publish(Value.Str("x"))
-        val deadline = System.currentTimeMillis() + 1000
-        while (calls < 1 && System.currentTimeMillis() < deadline) kotlinx.coroutines.delay(10)
-        kotlinx.coroutines.delay(200)
-        assertEquals(1, calls, "one publish = exactly one delivery")
+        // `hub` is out of scope; force collection so a missing anchor fails here, not by luck.
+        repeat(3) { System.gc(); Thread.sleep(50) }
+        p.publish(Value.Str("still alive"))
+        assertEquals(1, got.get(), "the registry survived its Kotlin wrapper being collected")
         s.close()
+        p.close()
+    }
+
+    @Test
+    fun `probe minimal single publish`() {
+        val hub = hub()
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val p = hub.publisher(60, ValueKind.STRING)
+            // AtomicInteger, not a bare var: the callback runs on the executor's thread, the
+            // assertion below on this one — a plain Int has no happens-before edge between them.
+            val calls = java.util.concurrent.atomic.AtomicInteger(0)
+            val done = CountDownLatch(1)
+            val s = hub.subscribeOn(60, pool) { _, _, _, _ ->
+                calls.incrementAndGet()
+                done.countDown()
+            }
+            p.publish(Value.Str("x"))
+            assertTrue(done.await(2, TimeUnit.SECONDS), "delivery arrived")
+            // Give any (buggy) second delivery a chance to land before asserting exactly-once.
+            Thread.sleep(200)
+            assertEquals(1, calls.get(), "one publish = exactly one delivery")
+            s.close()
+        } finally {
+            pool.shutdown()
+        }
     }
 
     @Test
     fun `flow events deliver values and closed`() = runBlocking {
         val hub = hub()
         val p = hub.publisher(6, ValueKind.STRING)
-        val collected = ArrayList<HubEvent>()
+        // Hub.events is a wake-up channel (MutableSharedFlow, replay=0): it only delivers to
+        // collectors already subscribed at emit time, and launchIn registers asynchronously.
+        // A fixed delay before publishing races that registration under load — wait for the
+        // flow's own subscriptionCount instead, the same "wait for the real signal" fix as the
+        // probe test above.
+        val flow = hub.events(6, java.util.concurrent.Executors.newSingleThreadExecutor())
+        val collected = java.util.Collections.synchronizedList(ArrayList<HubEvent>())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val job = hub.events(6, java.util.concurrent.Executors.newSingleThreadExecutor())
-            .onEach { collected.add(it) }
-            .launchIn(scope)
-        // let the subscription register, then push
-        kotlinx.coroutines.delay(100)
+        val done = CountDownLatch(3)
+        val job = flow.onEach { collected.add(it); done.countDown() }.launchIn(scope)
+        val subDeadline = System.currentTimeMillis() + 2000
+        while (flow.subscriptionCount.value < 1 && System.currentTimeMillis() < subDeadline) {
+            kotlinx.coroutines.delay(5)
+        }
+        assertEquals(1, flow.subscriptionCount.value, "collector registered before publishing")
         p.publish(Value.Str("one"))
         p.publish(Value.Str("two"))
         p.close()
-        val deadline = System.currentTimeMillis() + 2000
-        while (collected.size < 3 && System.currentTimeMillis() < deadline) {
-            kotlinx.coroutines.delay(10)
-        }
+        assertTrue(done.await(2, TimeUnit.SECONDS), "all three events arrived")
         scope.cancel()
         job.cancel()
 

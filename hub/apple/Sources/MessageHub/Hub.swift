@@ -65,10 +65,15 @@ public final class Publisher {
     private var raw: OpaquePointer?
     public let id: UInt32
     public let kind: ValueKind
+    /// Keeps the owning registry alive: the Rust handle holds only a `Weak` to it, and an
+    /// isolated `Hub` frees the registry in its `deinit`. Without this, a hub that goes out of
+    /// scope while its publishers live on turns every later publish into a silent no-op.
+    private let hub: Hub
 
     public init(hub: Hub = .shared, id: UInt32, kind: ValueKind) {
         self.id = id
         self.kind = kind
+        self.hub = hub
         guard let p = message_hub.publisher(hub.raw, id, kind.rawValue) else {
             fatalError("publisher: unknown kind \(kind.rawValue)")
         }
@@ -106,9 +111,13 @@ public final class Subscription {
     /// Keeps the callback's context alive exactly as long as Rust may call it.
     private let box: CallbackBox
 
-    fileprivate init(raw: OpaquePointer, box: CallbackBox) {
+    /// Keeps the owning registry alive; see `Publisher.hub`.
+    private let hub: Hub
+
+    fileprivate init(raw: OpaquePointer, box: CallbackBox, hub: Hub) {
         self.raw = raw
         self.box = box
+        self.hub = hub
     }
 
     deinit {
@@ -172,7 +181,7 @@ extension Hub {
         } else {
             sub = message_hub.subscribe(hubPtr, id, cbPtr, ctxPtr, dropPtr)!
         }
-        return Subscription(raw: sub, box: box)
+        return Subscription(raw: sub, box: box, hub: self)
     }
 
     /// Publishes a value to `id`; the wire kind follows from the Swift type, so callers never

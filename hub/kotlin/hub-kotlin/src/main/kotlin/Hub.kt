@@ -4,11 +4,11 @@ package message.rs.hub
 
 import message.rs.MessageCodecCompanion
 import message.rs.MessageEncodable
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import java.nio.ByteBuffer
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
@@ -158,21 +158,21 @@ class Hub private constructor(
     fun publisher(id: Long, kind: ValueKind): Publisher {
         val h = createPublisher(handle, id, kind.raw)
         require(h != 0L) { "publisher: unknown kind ${kind.raw}" }
-        return Publisher(h, id, kind)
+        return Publisher(h, id, kind, this)
     }
 
     /** Subscribes [callback] to [id]: inline delivery on the publisher's thread. */
     fun subscribe(id: Long, callback: SubscriptionCallback): Subscription {
         val s = subscribeNative(handle, id, callback)
         require(s != 0L) { "subscribe failed" }
-        return Subscription(s, id)
+        return Subscription(s, id, this)
     }
 
     /** Subscribes with every delivery dispatched onto [executor]. */
     fun subscribeOn(id: Long, executor: Executor, callback: SubscriptionCallback): Subscription {
         val s = subscribeOnNative(handle, id, callback, ExecutorScheduler(executor))
         require(s != 0L) { "subscribeOn failed" }
-        return Subscription(s, id)
+        return Subscription(s, id, this)
     }
 
     /** The newest value of [id], or null when nothing is published (or the last publisher closed). */
@@ -220,6 +220,13 @@ class Publisher internal constructor(
     @PublishedApi internal val handle: Long,
     val id: Long,
     val kind: ValueKind,
+    /**
+     * Keeps the owning registry alive: the Rust handles hold only a `Weak` to it, and an owned
+     * `Hub` frees the registry in its finalizer. Without this reference the JVM can collect the
+     * hub while a publisher is still in use (it is dead by liveness analysis as soon as the
+     * caller stops reading the variable), and every later publish silently becomes a no-op.
+     */
+    private val hub: Hub,
 ) : AutoCloseable {
     /** Publishes raw bytes (the hub is payload-agnostic). A no-op after [close]. */
     fun publish(payload: ByteArray) = Hub.publishNative(handle, payload)
@@ -242,6 +249,8 @@ class Publisher internal constructor(
 class Subscription internal constructor(
     @PublishedApi internal val handle: Long,
     val id: Long,
+    /** Keeps the owning registry alive; see [Publisher]'s same field. */
+    private val hub: Hub,
 ) : AutoCloseable {
     fun unsubscribe() = Hub.unsubscribeNative(handle)
 
@@ -345,24 +354,43 @@ class HubEvent(val id: Long, val kind: Int, val bytes: ByteArray?) {
 }
 
 /**
+ * The flow returned by [Hub.events]: a [MutableSharedFlow] whose `subscriptionCount` lets a
+ * caller wait until a collector is registered before publishing (the hub never replays, so an
+ * event emitted before `launchIn`'s coroutine has run is dropped, not queued).
+ *
+ * Holds the underlying [Subscription] for its own lifetime: nothing else would reference it,
+ * and its finalizer unsubscribes — without this anchor the GC can collect it (and silently stop
+ * deliveries) while the caller still holds the flow. [close] unsubscribes early; otherwise the
+ * subscription lives until this object itself is collected.
+ */
+@OptIn(ExperimentalForInheritanceCoroutinesApi::class) // MutableSharedFlow's inheritance contract is unstable
+class HubEventFlow internal constructor(
+    private val flow: MutableSharedFlow<HubEvent>,
+    private val subscription: Subscription,
+) : MutableSharedFlow<HubEvent> by flow, AutoCloseable {
+    override fun close() = subscription.close()
+}
+
+/**
  * Every event of `id` as a flow. Deliveries are scheduled onto [executor] (default: a private
  * single-thread pool); the flow is a wake-up channel — the current value always comes from
- * [Hub.get] (events are drop-oldest under pressure).
+ * [Hub.get] (events are drop-oldest under pressure). See [HubEventFlow] for the registration
+ * race and the subscription's lifetime.
  */
 fun Hub.events(
     id: Long,
     executor: Executor = Executors.newSingleThreadExecutor { Thread(it, "hub-events-$id") },
-): Flow<HubEvent> {
+): HubEventFlow {
     val flow = MutableSharedFlow<HubEvent>(
         replay = 0,
         extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    subscribeOn(id, executor) { _, kind, ptr, len ->
+    val subscription = subscribeOn(id, executor) { _, kind, ptr, len ->
         val bytes = if (ptr == 0L) null else Hub.copyBytesPublic(ptr, len)
         flow.tryEmit(HubEvent(id, kind, bytes))
     }
-    return flow.asSharedFlow()
+    return HubEventFlow(flow, subscription)
 }
 
 /**

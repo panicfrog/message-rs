@@ -29,6 +29,24 @@ private func hexBytes(_ hex: String) -> [UInt8] {
 struct HubTests {
     private func makeHub() -> Hub { Hub() }
 
+    @Test func handlesKeepTheirRegistryAliveAfterTheHubGoesOutOfScope() {
+        // The Rust handles hold only a Weak to the registry, and an isolated Hub frees it in
+        // deinit. Publisher/Subscription must retain the Hub themselves, or a hub that goes out
+        // of scope while its handles live on turns every later publish into a silent no-op.
+        let got = Counter()
+        var publisher: Publisher?
+        var subscription: Subscription?
+        do {
+            let hub = Hub()
+            subscription = hub.subscribe(id: 80) { _, kind, _, _ in if kind != 255 { got.bump() } }
+            publisher = Publisher(hub: hub, id: 80, kind: .string)
+        }
+        publisher?.publish(Value.string("still alive"))
+        #expect(got.value == 1)
+        subscription?.unsubscribe()
+        publisher?.close()
+    }
+
     @Test func publishSubscribeGet() {
         let hub = makeHub()
         let got = EventLog()
