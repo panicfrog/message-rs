@@ -364,6 +364,17 @@ export class Writer {
   }
 }
 
+/**
+ * The one contract every encodable value conforms to — generated namespaces and hand-written
+ * types alike. `encode` / `fromBytes` are exactly the functions generated code already has;
+ * conforming a new type is providing these three members, nothing else needs to know about it.
+ */
+export interface MessageCodec<T> {
+  readonly key: number;
+  encode(value: T): Uint8Array;
+  fromBytes(buf: Uint8Array): T | null;
+}
+
 /** Numeric value of an enum given either its number or a variant name. */
 export function enumNum(e: object, v: unknown): number {
   if (typeof v === 'string') {

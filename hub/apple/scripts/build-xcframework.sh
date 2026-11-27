@@ -5,11 +5,11 @@
 # otherwise keep linking the stale library.
 set -eu
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-OUT="$ROOT/hub/swift/Artifacts/MessageHubRust.xcframework"
-INC="$ROOT/hub/swift/Sources/MessageHubCxx/include"
+OUT="$ROOT/hub/apple/Artifacts/MessageHubRust.xcframework"
+INC="$ROOT/hub/apple/Sources/MessageHubCxx/include"
 
 cd "$ROOT"
-"$ROOT/hub/swift/export-headers.sh"
+"$ROOT/hub/apple/export-headers.sh"
 # cargo's target dir may be redirected (CARGO_TARGET_DIR on CI runners)
 TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 for t in aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin; do

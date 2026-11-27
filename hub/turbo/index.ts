@@ -21,6 +21,7 @@ import type { HubEvent } from './generated/rust-turbo/structs/HubEvent';
 import { decode, encode, ValueError, type DecodedValue } from './value';
 import { ValueKind, CLOSED_KIND } from './kinds';
 import { resolve, type Publishable } from './typed';
+import type { MessageCodec } from '@message/runtime';
 
 export { getHub } from './generated/rust-turbo/Hub';
 export type { Hub } from './generated/rust-turbo/Hub';
@@ -30,8 +31,9 @@ export { ValueKind, CLOSED_KIND } from './kinds';
 export { decode, encode, ValueError, type DecodedValue } from './value';
 export {
   bool, u8, i8, u16, i16, u32, i32, u64, i64, f32, f64, str, bytes, message,
-  type Typed, type Publishable,
+  type Typed, type Publishable, type HubCodec,
 } from './typed';
+export type { MessageCodec } from '@message/runtime';
 
 type NativeHub = ReturnType<typeof getHub>;
 
@@ -53,7 +55,25 @@ function hub(): NativeHub {
 export function channel<T extends DecodedValue = DecodedValue>(
   id: number,
   handler: (event: ChannelEvent<T>) => void,
+): () => void;
+/**
+ * Every non-Closed event decodes through `codec` — a generated struct's `MessageCodec` (e.g.
+ * `User.codec`): `channel(id, User.codec, (e) => e.value?.name)`. Same compile-time-hint
+ * semantics as the basic overload: a publisher sending another type is a publisher bug; `value`
+ * is null when the payload does not decode as `T`, never a trap.
+ */
+export function channel<T>(
+  id: number,
+  codec: MessageCodec<T>,
+  handler: (event: ChannelEvent<T>) => void,
+): () => void;
+export function channel(
+  id: number,
+  codecOrHandler: MessageCodec<unknown> | ((event: ChannelEvent<never>) => void),
+  maybeHandler?: (event: ChannelEvent<unknown>) => void,
 ): () => void {
+  const handler = (maybeHandler ?? codecOrHandler) as (event: ChannelEvent<unknown>) => void;
+  const codec = maybeHandler ? (codecOrHandler as MessageCodec<unknown>) : null;
   const subId = hub().subscribe(id, (raw) => {
     const e = raw as HubEvent;
     if (e.closed || e.kind === CLOSED_KIND) {
@@ -61,22 +81,25 @@ export function channel<T extends DecodedValue = DecodedValue>(
       return;
     }
     const bytes = Uint8Array.from(e.bytes ?? []);
-    // The cast only satisfies the caller's hint; the value is whatever the kind decoded to.
-    handler({ id, kind: e.kind, closed: false, value: decode(e.kind, bytes) as T, bytes });
+    // Without a codec, the cast only satisfies the caller's hint; the value is whatever the
+    // kind decoded to. With one, the codec actually decodes (null on a wrong-kind payload).
+    const value = codec ? codec.fromBytes(bytes) : decode(e.kind, bytes);
+    handler({ id, kind: e.kind, closed: false, value, bytes });
   });
   return () => hub().unsubscribe(subId);
 }
 
 /**
- * What a [channel] handler receives: the value already decoded (bytes only for MESSAGE).
- * `T` narrows `value` for the compiler; `kind` always reports the real wire kind.
+ * What a [channel] handler receives: the value already decoded. `T` narrows `value` for the
+ * compiler; `kind` always reports the real wire kind. For the codec overload, `T` is whatever
+ * that codec decodes to (e.g. a generated struct), not necessarily a `DecodedValue`.
  */
-export interface ChannelEvent<T extends DecodedValue = DecodedValue> {
+export interface ChannelEvent<T = DecodedValue> {
   id: number;
   /** The real wire kind of this payload (255 for Closed). */
   kind: number;
   closed: boolean;
-  /** The decoded value; null for Closed. `Uint8Array` for BYTES/MESSAGE. */
+  /** The decoded value; null for Closed, or when the payload doesn't decode as `T`. */
   value: T | null;
   /** The raw payload, for callers that want it (also set for basic kinds). */
   bytes?: Uint8Array;
@@ -91,9 +114,17 @@ export interface ChannelEvent<T extends DecodedValue = DecodedValue> {
  * not convert or check. The result is always the real kind's decoding; use [pullRaw] to see the
  * kind, or leave `T` off and narrow with `typeof` when the id's type is not fixed by convention.
  */
-export function pull<T extends DecodedValue = DecodedValue>(id: number): T | null {
+export function pull<T extends DecodedValue = DecodedValue>(id: number): T | null;
+/**
+ * Pulls the newest value of `id` as `T`, a generated struct (or any `MessageCodec` type):
+ * `pull(id, User.codec)`. Unlike the basic overload, `T` here is checked at runtime — the codec
+ * actually decodes the bytes, so a wrong-kind payload gives `null`, not a mistyped value.
+ */
+export function pull<T>(id: number, codec: MessageCodec<T>): T | null;
+export function pull(id: number, codec?: MessageCodec<unknown>): unknown {
   const got = pullRaw(id);
-  return got === null ? null : (decode(got.kind, got.bytes) as T);
+  if (got === null) return null;
+  return codec ? codec.fromBytes(got.bytes) : decode(got.kind, got.bytes);
 }
 
 /** The raw pull: `{ kind, bytes }`, for byte-level work (schema decoding, hashing, forwarding). */
@@ -111,8 +142,24 @@ export function pullRaw(id: number): { kind: number; bytes: Uint8Array } | null 
  * The publisher handle is managed per id and per kind: publishing a different kind to the same
  * id closes the previous publisher first (a publisher is a source of exactly one type).
  */
-export function publish(id: number, value: Publishable): void {
-  const { kind, bytes } = resolve(value);
+export function publish(id: number, value: Publishable): void;
+/**
+ * Same call shape for any `MessageCodec` type — generated structs included:
+ * `publish(id, user, User.codec)`, no manual encode step. A plain JS object has no reliable
+ * runtime brand to guess its schema from (unlike Swift/Kotlin's nominal types), so the codec is
+ * named once here instead of guessed per value — see [pull]/[channel]'s matching overloads.
+ */
+export function publish<T>(id: number, value: T, codec: MessageCodec<T>): void;
+export function publish(id: number, value: unknown, codec?: MessageCodec<unknown>): void {
+  if (codec) {
+    publishEncoded(id, ValueKind.MESSAGE, codec.encode(value));
+  } else {
+    const { kind, bytes } = resolve(value as Publishable);
+    publishEncoded(id, kind, bytes);
+  }
+}
+
+function publishEncoded(id: number, kind: number, bytes: Uint8Array): void {
   const key = `${id}:${kind}`;
   let handle = handles.get(key);
   if (handle === undefined) {

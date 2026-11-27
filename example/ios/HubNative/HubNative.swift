@@ -87,4 +87,17 @@ public class HubNative: RCTEventEmitter {
       resolver(nil)
     }
   }
+
+  /// Publishes a real generated struct (`Profile`) through the unified protocol — no manual
+  /// encode step, exactly like `publish(id:, UInt16(1))`. Reports the raw bytes back so JS can
+  /// decode them with its own `Profile.codec` and check both ends agree (see scenarios.ts).
+  @objc(publishProfileFromNative:resolver:rejecter:)
+  func publishProfileFromNative(
+    id: NSNumber,
+    resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock
+  ) {
+    let profile = Profile(age: 30, bio: "hello", nickname: "yamada", verified: true)
+    Hub.shared.publish(id: id.uint32Value, profile)
+    resolver(Array(profile.encode()))
+  }
 }

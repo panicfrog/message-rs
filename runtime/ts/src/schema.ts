@@ -6,9 +6,9 @@ import {
   readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,
   findExtBlock, findExtBlockIn, ScalarListView, StringListView, BytesListView, SlotListView,
   StructListView, StructEvoListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion,
-  vRegionShape, vExtent, vInstance, vEnum, ValidationError, type ValidationPath,
+  vRegionShape, vExtent, vInstance, vEnum, ValidationError, type ValidationPath, type MessageCodec,
   INSTANCE_HV, SHAPE_BIT, LEN_MASK,
-} from './runtime.js';
+} from './runtime';
 
 export enum Color {
   Red = 0,
@@ -75,6 +75,7 @@ export interface Legacy {
 }
 
 export namespace Legacy {
+  export const codec: MessageCodec<Legacy> = { key: 4, encode, fromBytes };
   export function decode(buf: Uint8Array): LegacyReader | null {
     return LegacyReader.decode(buf);
   }
@@ -196,6 +197,7 @@ export interface Node {
 }
 
 export namespace Node {
+  export const codec: MessageCodec<Node> = { key: 3, encode, fromBytes };
   export function decode(buf: Uint8Array): NodeReader | null {
     return NodeReader.decode(buf);
   }
@@ -299,6 +301,7 @@ export interface Point {
 }
 
 export namespace Point {
+  export const codec: MessageCodec<Point> = { key: 6, encode, fromBytes };
   export function decode(buf: Uint8Array): PointReader | null {
     return PointReader.decode(buf);
   }
@@ -451,6 +454,7 @@ export interface Profile {
 }
 
 export namespace Profile {
+  export const codec: MessageCodec<Profile> = { key: 2, encode, fromBytes };
   export function decode(buf: Uint8Array): ProfileReader | null {
     return ProfileReader.decode(buf);
   }
@@ -697,6 +701,7 @@ export interface Tally {
 }
 
 export namespace Tally {
+  export const codec: MessageCodec<Tally> = { key: 5, encode, fromBytes };
   export function decode(buf: Uint8Array): TallyReader | null {
     return TallyReader.decode(buf);
   }
@@ -1182,6 +1187,7 @@ export interface User {
 }
 
 export namespace User {
+  export const codec: MessageCodec<User> = { key: 1, encode, fromBytes };
   export function decode(buf: Uint8Array): UserReader | null {
     return UserReader.decode(buf);
   }

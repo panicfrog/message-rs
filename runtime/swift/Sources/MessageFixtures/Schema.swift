@@ -3,7 +3,9 @@
 // fromBytes / validate / encode() live on it). Map keys are `[K: V]`; Vec<u8> is Data.
 
 import Foundation
+#if canImport(MessageRuntime)
 import MessageRuntime
+#endif
 
 public enum Color: Int32, MessageEnum, CaseIterable {
   case red = 0
@@ -46,7 +48,7 @@ public struct LegacyReader: MessageReader {
     Legacy(id: id, note: note)
   }
 }
-public struct Legacy: Equatable {
+public struct Legacy: Equatable, MessageCodec {
   public var id: UInt32
   public var note: String
   public init(id: UInt32, note: String) {
@@ -72,6 +74,7 @@ func __validateLegacyInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   try __validateLegacyBase(m, lo, INSTANCE_HV)
 }
 extension Legacy {
+  public static var messageKey: UInt32 { LegacyReader.KEY }
   public static func decode(_ data: Data) -> LegacyReader? {
     LegacyReader.decode(data)
   }
@@ -132,7 +135,7 @@ public struct NodeReader: MessageReader {
     Node(value: value, children: children.map { $0.toOwned() })
   }
 }
-public struct Node: Equatable {
+public struct Node: Equatable, MessageCodec {
   public var value: UInt32
   public var children: [Node]
   public init(value: UInt32, children: [Node]) {
@@ -180,6 +183,7 @@ func __validateNodeInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   try __validateNodeBase(m, lo, INSTANCE_HV)
 }
 extension Node {
+  public static var messageKey: UInt32 { NodeReader.KEY }
   public static func decode(_ data: Data) -> NodeReader? {
     NodeReader.decode(data)
   }
@@ -240,7 +244,7 @@ public struct PointReader: MessageReader {
     Point(x: x, y: y)
   }
 }
-public struct Point: Equatable {
+public struct Point: Equatable, MessageCodec {
   public var x: Float
   public var y: Float
   public init(x: Float, y: Float) {
@@ -263,6 +267,7 @@ func __validatePointInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   try __validatePointBase(m, lo, INSTANCE_HV)
 }
 extension Point {
+  public static var messageKey: UInt32 { PointReader.KEY }
   public static func decode(_ data: Data) -> PointReader? {
     PointReader.decode(data)
   }
@@ -331,7 +336,7 @@ public struct ProfileReader: MessageReader {
     Profile(age: age, bio: bio, nickname: nickname, verified: verified)
   }
 }
-public struct Profile: Equatable {
+public struct Profile: Equatable, MessageCodec {
   public var age: UInt32
   public var bio: String
   public var nickname: String?
@@ -384,6 +389,7 @@ func __validateProfileInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   if let bs = m.findExtBlock(ProfileReader.EXT_VERSIONS, INSTANCE_HV, 2, 8, lo: lo, hi: hi) { try __validateProfileV2(m, bs, INSTANCE_HV) }
 }
 extension Profile {
+  public static var messageKey: UInt32 { ProfileReader.KEY }
   public static func decode(_ data: Data) -> ProfileReader? {
     ProfileReader.decode(data)
   }
@@ -504,7 +510,7 @@ public struct LabelsMapView: Sequence {
   public func makeIterator() -> Iterator { Iterator(view: self) }
 }
 
-public struct Tally: Equatable {
+public struct Tally: Equatable, MessageCodec {
   public var usage: [Color: UInt32]
   public var labels: [String: [String]]
   public var aliases: [String]
@@ -663,6 +669,7 @@ func __validateTallyInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   try __validateTallyBase(m, lo, INSTANCE_HV)
 }
 extension Tally {
+  public static var messageKey: UInt32 { TallyReader.KEY }
   public static func decode(_ data: Data) -> TallyReader? {
     TallyReader.decode(data)
   }
@@ -818,7 +825,7 @@ public struct ByIdMapView: Sequence {
   public func makeIterator() -> Iterator { Iterator(view: self) }
 }
 
-public struct User: Equatable {
+public struct User: Equatable, MessageCodec {
   public var id: UInt64
   public var name: String
   public var color: Color
@@ -1121,6 +1128,7 @@ func __validateUserInst(_ m: RawMessage, _ lo: Int, _ hi: Int) throws {
   if let bs = m.findExtBlock(UserReader.EXT_VERSIONS, INSTANCE_HV, 2, 24, lo: lo, hi: hi) { try __validateUserV2(m, bs, INSTANCE_HV) }
 }
 extension User {
+  public static var messageKey: UInt32 { UserReader.KEY }
   public static func decode(_ data: Data) -> UserReader? {
     UserReader.decode(data)
   }

@@ -1,5 +1,6 @@
 package message.rs.hub
 
+import message.rs.Profile
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -82,6 +83,30 @@ class ValueFirstTest {
         hub.publish(10, "now a string")
         assertEquals(ValueKind.STRING, hub.get(10)?.kind)
         assertEquals(Value.Str("now a string"), hub.pull(10))
+    }
+
+    @Test
+    fun `publishes and pulls a generated struct without manual encoding`() {
+        // The whole point of the unified protocol: a MessageEncodable type (here, a real
+        // generated data class) goes through publish/pull exactly like UShort does — no
+        // encode()/fromBytes() call at the call site.
+        val hub = Hub.create()
+        val profile = Profile(age = 30u, bio = "hello", nickname = "yamada", verified = true)
+        hub.publish(20, profile)
+        assertEquals(ValueKind.MESSAGE, hub.get(20)?.kind)
+
+        val pulled = hub.pull(20, Profile.Companion)
+        assertEquals(profile, pulled)
+
+        // the bytes on the wire are exactly what the schema's own encoder produces
+        assertContentEquals(profile.encode(), hub.get(20)?.bytes)
+    }
+
+    @Test
+    fun `pull of the wrong type is null not a trap`() {
+        val hub = Hub.create()
+        hub.publish(21, "not a Profile")
+        assertNull(hub.pull(21, Profile.Companion))
     }
 
     @Test

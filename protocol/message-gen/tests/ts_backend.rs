@@ -45,6 +45,8 @@ fn everything_is_generated_and_no_ir_is_shipped() {
     assert!(ts.contains("export function validate(buf: Uint8Array): ValidationError | null {"));
     assert!(ts.contains("function __validateLegacyBase(dv: DataView, base: number, hv: number, path: ValidationPath): void {"));
     assert!(ts.contains("export function decodeBy(buf: Uint8Array) {"));
+    assert!(ts.contains("type MessageCodec,\n"));
+    assert!(ts.contains("export const codec: MessageCodec<Legacy> = { key: 4, encode, fromBytes };"));
     // literal layout: header + fixed region (id @0, reserved bool @4, note slot @8 -> 16)
     assert!(ts.contains("const w = new Writer(24);"));
     assert!(ts.contains("w.u32(base + 0, value.id);"));

@@ -6,6 +6,9 @@ let package = Package(
     name: "message-rs",
     products: [
         .library(name: "MessageRuntime", targets: ["MessageRuntime"]),
+        // The generated fixture schema, for other packages' tests (e.g. hub/apple proving a
+        // real MessageCodec type publishes/pulls end to end).
+        .library(name: "MessageFixtures", targets: ["MessageFixtures"]),
     ],
     targets: [
         .target(name: "MessageRuntime"),

@@ -1,13 +1,7 @@
 package message.rs.hub
 
-/**
- * A Kotlin value that knows its own wire kind — so callers write `publish(1, 65535.toUShort())`
- * and never name a [ValueKind]. Kotlin's unsigned types are distinct from the signed ones
- * (`UShort` vs `Short` vs `Double`), so the mapping is exact: no wrappers, no guessing.
- */
-interface HubValue {
-    val hubValue: Value
-}
+import message.rs.MessageCodecCompanion
+import message.rs.MessageEncodable
 
 fun Boolean.asHubValue() = Value.Bool(this)
 fun UByte.asHubValue() = Value.U8(this.toInt())
@@ -23,12 +17,19 @@ fun Double.asHubValue() = Value.F64(this)
 fun String.asHubValue() = Value.Str(this)
 fun ByteArray.asHubValue() = Value.Bytes(this)
 
-/** A message-rs payload: the id is the message key, decode it with the generated `XxxReader`. */
+/** A message-rs payload without a schema on hand: decode it yourself with the generated `XxxReader`. */
 class MessageBytes(val bytes: ByteArray)
 
-/** Resolves any supported Kotlin value to its [Value]; the kind follows the type. */
+/**
+ * Resolves any supported Kotlin value to its [Value]; the kind follows the type. Kotlin's
+ * unsigned types are distinct from the signed ones (`UShort` vs `Short` vs `Double`), so the
+ * mapping is exact: no wrappers, no guessing. Generated data classes need no new branch either:
+ * they already implement [MessageEncodable], checked once below for every current and future
+ * generated type — conforming a new type to that protocol is the whole integration.
+ */
 fun hubValueOf(v: Any): Value = when (v) {
     is Value -> v
+    is MessageEncodable -> v.hubValue
     is MessageBytes -> Value.Message(v.bytes)
     is Boolean -> v.asHubValue()
     is UByte -> v.asHubValue()
@@ -45,3 +46,12 @@ fun hubValueOf(v: Any): Value = when (v) {
     is ByteArray -> v.asHubValue()
     else -> throw IllegalArgumentException("cannot publish a value of type ${v::class.simpleName}")
 }
+
+/**
+ * Every [MessageEncodable] type — generated data classes included — is publishable as-is:
+ * `publish(1, user)`, no manual encode step. [MessageEncodable.encode] is exactly the method
+ * generated code already has; this only supplies the [Value] wrapper. Adding a new encodable
+ * type never touches this file. Pull back with `hub.pull(id, User.Companion)` — the companion
+ * already implements [MessageCodecCompanion], so it needs no wiring either.
+ */
+val MessageEncodable.hubValue: Value get() = Value.Message(encode())

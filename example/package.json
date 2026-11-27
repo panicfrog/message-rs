@@ -10,12 +10,13 @@
     "test": "jest"
   },
   "dependencies": {
+    "@message/runtime": "file:../runtime/ts",
+    "@react-native/new-app-screen": "0.88.1",
+    "hub-turbo": "file:../hub/turbo",
     "react": "19.3.0",
     "react-native": "0.88.1",
-    "@react-native/new-app-screen": "0.88.1",
-    "react-native-safe-area-context": "^5.5.2",
     "react-native-rust-turbo": "^0.88.5",
-    "hub-turbo": "file:../hub/turbo"
+    "react-native-safe-area-context": "^5.5.2"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

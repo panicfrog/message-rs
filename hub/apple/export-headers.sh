@@ -4,7 +4,7 @@
 # other generated artifact in this repository.
 set -eu
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-INC="$ROOT/hub/swift/Sources/MessageHubCxx/include"
+INC="$ROOT/hub/apple/Sources/MessageHubCxx/include"
 cd "$ROOT"
 
 # Ask cargo where it put things instead of guessing target/: CARGO_TARGET_DIR may point

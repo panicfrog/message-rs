@@ -41,9 +41,9 @@ class LegacyReader(override val msg: RawMessage, override val origin: Int, overr
 data class Legacy(
     val id: UInt,
     val note: String,
-) {
+) : MessageEncodable {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
-    fun encode(): ByteArray {
+    override fun encode(): ByteArray {
         val w = Writer(32)
         w.reserve(8)
         val base = w.reserve(24)
@@ -55,9 +55,10 @@ data class Legacy(
         return w.finish()
     }
 
-    companion object {
+    companion object : MessageCodecCompanion<Legacy> {
+        override val messageKey: UInt = LegacyReader.KEY
         fun decode(bytes: ByteArray): LegacyReader? = LegacyReader.decode(bytes)
-        fun fromBytes(bytes: ByteArray): Legacy? = LegacyReader.decode(bytes)?.toOwned()
+        override fun fromBytes(bytes: ByteArray): Legacy? = LegacyReader.decode(bytes)?.toOwned()
         /// Strictly check an untrusted buffer; after null no accessor can throw on it.
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, LegacyReader.KEY, LegacyReader.FIXED_LEN)
@@ -111,9 +112,9 @@ class NodeReader(override val msg: RawMessage, override val origin: Int, overrid
 data class Node(
     val value: UInt,
     val children: List<Node>,
-) {
+) : MessageEncodable {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
-    fun encode(): ByteArray {
+    override fun encode(): ByteArray {
         val w = Writer(20)
         w.reserve(8)
         val base = w.reserve(12)
@@ -125,9 +126,10 @@ data class Node(
         return w.finish()
     }
 
-    companion object {
+    companion object : MessageCodecCompanion<Node> {
+        override val messageKey: UInt = NodeReader.KEY
         fun decode(bytes: ByteArray): NodeReader? = NodeReader.decode(bytes)
-        fun fromBytes(bytes: ByteArray): Node? = NodeReader.decode(bytes)?.toOwned()
+        override fun fromBytes(bytes: ByteArray): Node? = NodeReader.decode(bytes)?.toOwned()
         /// Strictly check an untrusted buffer; after null no accessor can throw on it.
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, NodeReader.KEY, NodeReader.FIXED_LEN)
@@ -200,9 +202,9 @@ class PointReader(override val msg: RawMessage, override val origin: Int, overri
 data class Point(
     val x: Float,
     val y: Float,
-) {
+) : MessageEncodable {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
-    fun encode(): ByteArray {
+    override fun encode(): ByteArray {
         val w = Writer(16)
         w.reserve(8)
         val base = w.reserve(8)
@@ -214,9 +216,10 @@ data class Point(
         return w.finish()
     }
 
-    companion object {
+    companion object : MessageCodecCompanion<Point> {
+        override val messageKey: UInt = PointReader.KEY
         fun decode(bytes: ByteArray): PointReader? = PointReader.decode(bytes)
-        fun fromBytes(bytes: ByteArray): Point? = PointReader.decode(bytes)?.toOwned()
+        override fun fromBytes(bytes: ByteArray): Point? = PointReader.decode(bytes)?.toOwned()
         /// Strictly check an untrusted buffer; after null no accessor can throw on it.
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, PointReader.KEY, PointReader.FIXED_LEN)
@@ -280,9 +283,9 @@ data class Profile(
     val bio: String,
     val nickname: String?,
     val verified: Boolean?,
-) {
+) : MessageEncodable {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
-    fun encode(): ByteArray {
+    override fun encode(): ByteArray {
         val w = Writer(32)
         w.reserve(8)
         val base = w.reserve(24)
@@ -295,9 +298,10 @@ data class Profile(
         return w.finish()
     }
 
-    companion object {
+    companion object : MessageCodecCompanion<Profile> {
+        override val messageKey: UInt = ProfileReader.KEY
         fun decode(bytes: ByteArray): ProfileReader? = ProfileReader.decode(bytes)
-        fun fromBytes(bytes: ByteArray): Profile? = ProfileReader.decode(bytes)?.toOwned()
+        override fun fromBytes(bytes: ByteArray): Profile? = ProfileReader.decode(bytes)?.toOwned()
         /// Strictly check an untrusted buffer; after null no accessor can throw on it.
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, ProfileReader.KEY, ProfileReader.FIXED_LEN)
@@ -419,9 +423,9 @@ data class Tally(
     val aliases: List<String>,
     val grid: List<List<String>>,
     val groups: List<List<Profile>>,
-) {
+) : MessageEncodable {
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
-    fun encode(): ByteArray {
+    override fun encode(): ByteArray {
         val w = Writer(48)
         w.reserve(8)
         val base = w.reserve(40)
@@ -433,9 +437,10 @@ data class Tally(
         return w.finish()
     }
 
-    companion object {
+    companion object : MessageCodecCompanion<Tally> {
+        override val messageKey: UInt = TallyReader.KEY
         fun decode(bytes: ByteArray): TallyReader? = TallyReader.decode(bytes)
-        fun fromBytes(bytes: ByteArray): Tally? = TallyReader.decode(bytes)?.toOwned()
+        override fun fromBytes(bytes: ByteArray): Tally? = TallyReader.decode(bytes)?.toOwned()
         /// Strictly check an untrusted buffer; after null no accessor can throw on it.
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, TallyReader.KEY, TallyReader.FIXED_LEN)
@@ -726,7 +731,7 @@ data class User(
     val score: Double,
     val tags2: List<String>,
     val vip: Boolean?,
-) {
+) : MessageEncodable {
     override fun equals(other: Any?): Boolean =
         other is User &&
             id == other.id &&
@@ -785,7 +790,7 @@ data class User(
     }
 
     /// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.
-    fun encode(): ByteArray {
+    override fun encode(): ByteArray {
         val w = Writer(168)
         w.reserve(8)
         val base = w.reserve(160)
@@ -798,9 +803,10 @@ data class User(
         return w.finish()
     }
 
-    companion object {
+    companion object : MessageCodecCompanion<User> {
+        override val messageKey: UInt = UserReader.KEY
         fun decode(bytes: ByteArray): UserReader? = UserReader.decode(bytes)
-        fun fromBytes(bytes: ByteArray): User? = UserReader.decode(bytes)?.toOwned()
+        override fun fromBytes(bytes: ByteArray): User? = UserReader.decode(bytes)?.toOwned()
         /// Strictly check an untrusted buffer; after null no accessor can throw on it.
         fun validate(bytes: ByteArray): ValidationError? = runValidation {
             val m = RawMessage.validating(bytes, UserReader.KEY, UserReader.FIXED_LEN)

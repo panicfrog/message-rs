@@ -49,10 +49,12 @@ fn everything_is_generated_and_no_ir_is_shipped() {
     assert!(kt.contains("data class Legacy("));
     assert!(kt.contains("private fun __writeLegacyBase(w: Writer, base: Int, value: Legacy) {"));
     assert!(kt.contains("private fun __validateLegacyBase(m: RawMessage, base: Int, hv: Int) {"));
-    assert!(kt.contains("fun encode(): ByteArray {"));
+    assert!(kt.contains("override fun encode(): ByteArray {"));
     assert!(kt.contains("fun validate(bytes: ByteArray): ValidationError? = runValidation {"));
-    assert!(kt.contains("fun fromBytes(bytes: ByteArray): Legacy? = LegacyReader.decode(bytes)?.toOwned()"));
+    assert!(kt.contains("override fun fromBytes(bytes: ByteArray): Legacy? = LegacyReader.decode(bytes)?.toOwned()"));
     assert!(kt.contains("fun decode(bytes: ByteArray): LegacyReader? = LegacyReader.decode(bytes)"));
+    assert!(kt.contains("companion object : MessageCodecCompanion<Legacy> {"));
+    assert!(kt.contains("override val messageKey: UInt = LegacyReader.KEY"));
     assert!(!kt.contains("SchemaIr") && !kt.contains("MESSAGE_SCHEMA"));
     // same package as the runtime: nothing to import
     assert!(!kt.contains("import "), "{kt}");
@@ -66,6 +68,8 @@ fn the_package_can_be_moved_with_explicit_runtime_imports() {
     assert!(kt.contains("import message.rs.runValidation\n"));
     // the runtime symbols the generated code refers to
     assert!(kt.contains("import message.rs.MapEntry\n"));
+    assert!(kt.contains("import message.rs.MessageEncodable\n"));
+    assert!(kt.contains("import message.rs.MessageCodecCompanion\n"));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import MessageFixtures
 @testable import MessageHub
 
 @Suite("value-first API")
@@ -56,6 +57,29 @@ struct ValueFirstTests {
         hub.publish(id: 10, "now a string")
         #expect(hub.get(id: 10)?.kind == .string)
         #expect(hub.pull(id: 10) == .string("now a string"))
+    }
+
+    @Test func publishesAndPullsAGeneratedStructWithoutManualEncoding() throws {
+        // The whole point of the unified protocol: a MessageCodec type (here, a real generated
+        // struct) goes through publish/pull exactly like UInt16 does — no encode()/fromBytes()
+        // call at the call site.
+        let hub = Hub()
+        let profile = Profile(age: 30, bio: "hello", nickname: "yamada", verified: true)
+        hub.publish(id: 20, profile)
+        #expect(hub.get(id: 20)?.kind == .message)
+
+        let pulled: Profile? = hub.pull(id: 20)
+        #expect(pulled == profile)
+
+        // the bytes on the wire are exactly what the schema's own encoder produces
+        #expect(hub.get(id: 20)?.bytes == Array(profile.encode()))
+    }
+
+    @Test func pullOfTheWrongTypeIsNilNotATrap() throws {
+        let hub = Hub()
+        hub.publish(id: 21, "not a Profile")
+        let pulled: Profile? = hub.pull(id: 21)
+        #expect(pulled == nil)
     }
 
     @Test func channelReceivesDecodedValues() async throws {

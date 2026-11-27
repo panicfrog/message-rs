@@ -174,7 +174,7 @@ impl Subscription {
 - **M1 (done)** — Rust core: `hub/Cargo.toml` (crate `message-hub`, zero dependencies),
   `hub/src/value.rs`, `hub/src/lib.rs` (`Hub`, `Publisher`, `Subscription`, `Event`,
   `Scheduler`), `hub/tests/hub.rs` (section 7); `hub` is a root workspace member.
-- **M2** — `hub-ffi` (dir `hub/ffi/`) plus the SwiftPM package `MessageHub` (dir `hub/swift/`):
+- **M2** — `hub-ffi` (dir `hub/ffi/`) plus the SwiftPM package `MessageHub` (dir `hub/apple/`):
   the Swift surface as a `cxx` bridge, on the toolchain jsi-rs already uses (`cxx` /
   `cxx-build` are in every jsi-turbo superlib, so this adds no dependency there; UniFFI stays
   ruled out). Plan, in order:
@@ -208,11 +208,11 @@ impl Subscription {
      crosses a Swift frame.
   2. **Build and packaging**: `hub/ffi/build.rs` runs `cxx-build` (`cargo test` compiles the
      glue and covers the bridge). The generated header and the `cxx` runtime headers are
-     exported into `hub/swift/Sources/MessageHubCxx/include/` and committed, like every other
+     exported into `hub/apple/Sources/MessageHubCxx/include/` and committed, like every other
      generated artifact here, with a CI freshness check. The package has four targets:
      `MessageHubCxx` (Clang, headers only — SwiftPM writes its module map), `MessageHubRust`
      (`binaryTarget`: an xcframework holding `libhub_ffi.a` with the core inside, device,
-     simulator and macOS slices, built by `hub/swift/scripts/build-xcframework.sh`, gitignored),
+     simulator and macOS slices, built by `hub/apple/scripts/build-xcframework.sh`, gitignored),
      `MessageHub` (Swift with C++ interop, depending on both) and `MessageHubTests` (also with
      C++ interop). C++ interop is switched on only for the two Swift targets; the product apps
      see is pure Swift.
@@ -279,8 +279,47 @@ exactly one SHARED static and both symbol sets; both Swift modes build; all exis
 Distribution (to confirm): `message-hub` and the two RN-independent surfaces (`hub-ffi`,
 `hub-jni`) as crates.io crates — pure Rust, no React Native version coupling — so the superlib's
 cargo build resolves them normally; `hub-turbo` ships as an npm package the jsi-turbo way; the
-Swift package stays in `hub/swift/` and is consumed as a local package first, its own
+Swift package stays in `hub/apple/` and is consumed as a local package first, its own
 distribution can wait.
+
+## 6b. Unified encoding protocol (基本类型与生成的结构体一视同仁)
+
+Settled in discussion on 2026-11-27. The value-first API above only knew basic types; a
+message-rs struct had to be hand-encoded (`User.encode(u)`) and wrapped (`MessageBytes(bytes)`)
+to publish, then hand-decoded on pull — two encodings exposed to the caller, and "what can be
+published" was a hardcoded list. Fixed by one protocol per end that both basic types and
+generated structs conform to; extending it later is implementing the protocol, not touching the
+hub.
+
+**Architecture: hub and runtime stay independent, integrated by composition.** The runtime
+(each end's `MessageRuntime` / `message.rs` / `runtime.ts`) defines the codec protocol; generated
+code already conforms to it using its existing `encode()`/`fromBytes`. The hub still only moves
+`(kind, bytes)` and knows no schema — it depends on the runtime package for the protocol type
+only (pure Swift/Kotlin/TS, no Rust symbols), never the other way around. No circular dependency:
+generated code already imports its runtime.
+
+| End | Runtime protocol | Hub integration |
+|---|---|---|
+| Swift | `MessageCodec` (`messageKey`, `encode() -> Data`, `static fromBytes(Data) -> Self?`) in `MessageRuntime` | `Hub.publish<T: MessageCodec>` / `pull<T: MessageCodec>` overloads alongside the `HubValue` ones — Swift cannot declare a blanket conformance to a local protocol for a type from another module, so two overloads share one private implementation instead |
+| Kotlin | `MessageEncodable` (instance: `encode()`) + `MessageCodecCompanion<T>` (companion: `messageKey`, `fromBytes`) in `message.rs` — split because Kotlin keeps `fromBytes` on the companion, same pattern as the existing `MessageEnumCompanion` | `hubValueOf` checks `is MessageEncodable` once (covers every generated type); `hub.pull(id, User.Companion)` — the companion is passed explicitly, no registry |
+| TS | `MessageCodec<T>` (`key`, `encode(value)`, `fromBytes(buf)`) in `runtime.ts`; each namespace exports `codec: MessageCodec<T>` | `publish(id, value, codec)` / `pull(id, codec)` / `channel(id, codec, handler)` overloads. A plain JS object has no reliable runtime brand to guess its schema from (unlike Swift/Kotlin's nominal types), so the codec is named once at the call site instead of guessed per value or looked up in a registry |
+
+No auto-registration registry on any end (considered for TS/Kotlin, rejected): Swift/Kotlin don't
+need one (nominal types / an explicit companion argument already carry the identity), and giving
+TS one too would mean a third mechanism for the same job. `MessageBytes` stays on Swift/Kotlin as
+the escape hatch for a payload without a schema on hand.
+
+Two build-layout findings while wiring the runtime dependency in:
+- **`hub/swift` renamed to `hub/apple`.** SwiftPM derives a local package's identity from its
+  directory's basename when the manifest is pre-6.0; both `hub/swift` and `runtime/swift` ended
+  in `swift`, which SwiftPM read as a package depending on itself ("cyclic dependency" at
+  tools-version 5.9, or a product-not-found misresolution at 6.0+) regardless of the declared
+  `name:` override. Renaming the directory sidesteps the collision with no tools-version bump;
+  `hub/kotlin`/`hub/turbo` never had this problem (different basenames already).
+- Kotlin wires the runtime in through a Gradle composite build (`includeBuild("../../runtime/kotlin")`
+  in `hub/kotlin/settings.gradle.kts`, substituted by the `message.rs` group added to the
+  runtime's subprojects) — the source-dependency equivalent of Swift's local `.package(path:)`,
+  no published artifact needed. TS uses a `file:../../runtime/ts` devDependency.
 
 ## 7. M1 test list
 
@@ -327,7 +366,7 @@ distribution can wait.
   opaque types to be defined in the bridge crate), and `publish` is infallible like the core —
   the hub is payload-agnostic, so fixed-size kinds are validated when a value is decoded, not on
   publish. The scheduler contract is `run` (borrowing the job) then `drop` exactly once.
-- M2 steps 2 and 3 are in place: `hub/swift/` is the SwiftPM package (`MessageHubCxx` headers,
+- M2 steps 2 and 3 are in place: `hub/apple/` is the SwiftPM package (`MessageHubCxx` headers,
   `MessageHubRust` binaryTarget xcframework with iOS + simulator + macOS slices, `MessageHub`
   Swift wrapper with C++ interop, tests with it too). `export-headers.sh` copies the generated
   bridge header in; `scripts/build-xcframework.sh` builds the slices (it removes the old
@@ -339,7 +378,7 @@ distribution can wait.
   (`const T&`) are **not imported at all** — the bridge therefore takes every handle as a raw
   pointer, and `shared_ptr()` is the pointer-returning variant of `shared()`. Opaque types stay
   invisible in Swift: handles are `OpaquePointer` end to end.
-- M3 is in place: `hub/swift/Sources/MessageHub/Observable.swift` adds `hub.events(id:)`
+- M3 is in place: `hub/apple/Sources/MessageHub/Observable.swift` adds `hub.events(id:)`
   (an `AsyncStream<HubEvent>` whose continuation is resumed from a relay queue — yielding
   straight from the hub's callback threads wakes the consumer unreliably), `HubObservable`
   (an `ObservableObject` mirror per id with `@Published` lastValue/lastBytes/isClosed and a
@@ -370,4 +409,12 @@ distribution can wait.
   until jsi-rs lands: only its compile-time half has been probed (bridge symbols typecheck in
   Swift without linking the Rust library); the final-link half needs the real superlib
   aggregation to test against.
+- The unified encoding protocol (section 6b) is in place on all three ends: runtime protocols
+  (`MessageCodec` / `MessageEncodable`+`MessageCodecCompanion` / `MessageCodec<T>`), generator
+  conformance emission (regenerated fixtures committed), and hub publish/pull(/channel) accepting
+  a generated struct directly. Verified with a real generated type (`Profile`) published and
+  pulled back on each end, plus a wrong-kind pull returning nil/null instead of trapping: Rust
+  110 tests, Swift runtime 14 + hub/apple 17, Kotlin runtime 19 + hub/kotlin 16, TS runtime 15 +
+  hub/turbo 18 — all green. `hub/swift` is now `hub/apple` (see 6b for why); every path reference
+  (CI, podspec, module.modulemap, symlinks, scripts, .gitignore) was updated in the same pass.
 - Repo conventions: English comments/docs/errors; commits carry no attribution lines.

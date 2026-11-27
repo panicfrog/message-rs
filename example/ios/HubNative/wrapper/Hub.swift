@@ -1,1 +1,1 @@
-../../../../hub/swift/Sources/MessageHub/Hub.swift
+../../../../hub/apple/Sources/MessageHub/Hub.swift

@@ -21,7 +21,7 @@ Pod::Spec.new do |s|
 
   s.pod_target_xcconfig = {
     # the cxxbridge header + the cxx runtime header, as the MessageHubCxx Clang target exposes them
-    "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/../../../hub/swift/Sources/MessageHubCxx/include\"",
+    "HEADER_SEARCH_PATHS" => "\"$(PODS_TARGET_SRCROOT)/../../../hub/apple/Sources/MessageHubCxx/include\"",
     "SWIFT_INCLUDE_PATHS" => "\"$(PODS_TARGET_SRCROOT)\"",
     # the wrapper uses C++ interop; RN 0.88 headers need C++20 (concepts), so match that
     "SWIFT_VERSION" => "5.9",

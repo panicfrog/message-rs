@@ -1,0 +1,1 @@
+../../../../runtime/swift/Sources/MessageFixtures/Schema.swift

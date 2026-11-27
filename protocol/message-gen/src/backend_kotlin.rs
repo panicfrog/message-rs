@@ -13,7 +13,8 @@ pub const RUNTIME_PACKAGE: &str = "message.rs";
 
 /// Runtime symbols the generated code refers to; imported when the package is not the runtime's.
 const RUNTIME_IMPORTS: &[&str] = &[
-    "BytesListView", "MapEntry", "MessageEnum", "MessageEnumCompanion", "MessageReader", "MessageScalar", "RawMessage",
+    "BytesListView", "MapEntry", "MessageCodecCompanion", "MessageEncodable", "MessageEnum", "MessageEnumCompanion",
+    "MessageReader", "MessageScalar", "RawMessage",
     "INSTANCE_HV", "LEN_MASK", "SHAPE_BIT", "ScalarListView", "SlotListView", "StringListView", "StructEvoListView",
     "UTF8_STRING_ORDER", "ValidationError", "Writer", "checkBytesSlot", "checkEnum", "checkExtBlock", "checkExtent",
     "checkIndex", "checkInstance", "checkRegion", "checkRegionShape", "checkStrSlot",
@@ -540,7 +541,7 @@ fn write_owned_struct(out: &mut String, m: &MessageDescriptor) {
         let ty = if f.optional { format!("{ty}?") } else { ty };
         let _ = writeln!(out, "    val {}: {ty},", kotlin_field(&f.name));
     }
-    let _ = writeln!(out, ") {{");
+    let _ = writeln!(out, ") : MessageEncodable {{");
     let fields: Vec<&FieldDescriptor> = m.fields.iter().filter(|f| !f.reserved).collect();
     if fields.iter().any(|f| contains_bytes(&f.ty)) {
         let _ = writeln!(out, "    override fun equals(other: Any?): Boolean =");
@@ -611,7 +612,7 @@ fn write_encode(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     let need = 8 + m.layout.fixed_len;
     let max_version = m.layout.ext_blocks.last().map_or(0, |b| b.version);
     line(out, 1, "/// Canonical encoding (byte-identical to Rust and TypeScript): declaration-order var data, sorted map keys.");
-    line(out, 1, "fun encode(): ByteArray {");
+    line(out, 1, "override fun encode(): ByteArray {");
     line(out, 2, &format!("val w = Writer({need})"));
     line(out, 2, "w.reserve(8)");
     line(out, 2, &format!("val base = w.reserve({})", m.layout.fixed_len));
@@ -958,9 +959,10 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     write_owned_struct(out, m);
     write_encode(out, m, set);
     line(out, 1, "");
-    line(out, 1, "companion object {");
+    line(out, 1, &format!("companion object : MessageCodecCompanion<{name}> {{"));
+    line(out, 2, &format!("override val messageKey: UInt = {name}Reader.KEY"));
     line(out, 2, &format!("fun decode(bytes: ByteArray): {name}Reader? = {name}Reader.decode(bytes)"));
-    line(out, 2, &format!("fun fromBytes(bytes: ByteArray): {name}? = {name}Reader.decode(bytes)?.toOwned()"));
+    line(out, 2, &format!("override fun fromBytes(bytes: ByteArray): {name}? = {name}Reader.decode(bytes)?.toOwned()"));
     write_validate(out, m);
     line(out, 1, "}");
     let _ = writeln!(out, "}}\n");

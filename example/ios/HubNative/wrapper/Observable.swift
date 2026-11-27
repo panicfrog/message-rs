@@ -1,1 +1,1 @@
-../../../../hub/swift/Sources/MessageHub/Observable.swift
+../../../../hub/apple/Sources/MessageHub/Observable.swift

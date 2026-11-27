@@ -197,6 +197,15 @@ public protocol MessageReader {
     init(msg: RawMessage, origin: Int, end: Int, hv: UInt8)
 }
 
+/// The one contract every encodable value conforms to — generated structs and hand-written
+/// types alike. `encode()` / `fromBytes(_:)` are exactly the methods generated code already has;
+/// conforming a new type is implementing these three members, nothing else needs to know about it.
+public protocol MessageCodec {
+    static var messageKey: UInt32 { get }
+    func encode() -> Data
+    static func fromBytes(_ data: Data) -> Self?
+}
+
 // ---- Lazy views ----
 
 public struct ScalarListView<T: MessageScalar>: Sequence {

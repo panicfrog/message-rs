@@ -12,6 +12,9 @@ allprojects {
 }
 
 subprojects {
+    // Lets other Gradle builds (hub/kotlin) depend on these modules by coordinate through an
+    // includeBuild, without publishing an artifact.
+    group = "message.rs"
     plugins.withId("org.jetbrains.kotlin.jvm") {
         extensions.configure<JavaPluginExtension> {
             sourceCompatibility = JavaVersion.VERSION_1_8

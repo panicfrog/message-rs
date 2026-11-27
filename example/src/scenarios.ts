@@ -7,6 +7,7 @@
 
 import { NativeModules, NativeEventEmitter } from 'react-native';
 import { channel, pull, pullRaw, publish, close, u16, message, ValueKind, CLOSED_KIND } from 'hub-turbo';
+import { Profile } from '@message/runtime/src/schema';
 
 export type Result = { name: string; ok: boolean; detail: string };
 
@@ -19,6 +20,7 @@ const native = NativeModules.HubNative as {
   subscribeFromNative(id: number): Promise<number>;
   unsubscribeNative(handle: number): void;
   pullFromNative(id: number): Promise<{ kind: number; bytes: number[] } | null>;
+  publishProfileFromNative(id: number): Promise<number[]>;
 } | undefined;
 
 function bytesOf(b: Uint8Array): number[] {
@@ -136,6 +138,35 @@ async function closedAcross(): Promise<Result> {
 }
 
 
+/**
+ * The unified protocol crosses languages too: native publishes a real generated struct
+ * (`Profile`) with no manual encode step — `Hub.shared.publish(id:, profile)` / `publish(id, profile)`
+ * — and JS decodes it with its own `Profile.codec`, no manual `fromBytes` either. Both ends must
+ * agree on every field, not just "some bytes arrived".
+ */
+async function structAcross(): Promise<Result> {
+  if (!native) return { name: 'struct across', ok: false, detail: 'HubNative module missing' };
+  const id = 9006;
+  try {
+    const nativeBytes = await native.publishProfileFromNative(id);
+    const pulled = pull(id, Profile.codec);
+    const expected: Profile = { age: 30, bio: 'hello', nickname: 'yamada', verified: true };
+    const jsMatches = !!pulled && pulled.age === expected.age && pulled.bio === expected.bio &&
+      pulled.nickname === expected.nickname && pulled.verified === expected.verified;
+    // the bytes JS pulls are exactly what native encoded — one wire format, three languages
+    const raw = pullRaw(id);
+    const bytesMatch = !!raw && eq(Array.from(raw.bytes), nativeBytes);
+    const ok = jsMatches && bytesMatch;
+    return {
+      name: 'struct across',
+      ok,
+      detail: ok ? 'native published a Profile, JS decoded the same fields' : `js=${JSON.stringify(pulled)} bytesMatch=${bytesMatch}`,
+    };
+  } finally {
+    close(id);
+  }
+}
+
 /** Reports what this runtime provides (the ASCII helper's premise, checked not assumed). */
 async function runtimeGlobals(): Promise<Result> {
   const g = globalThis as Record<string, unknown>;
@@ -154,7 +185,7 @@ async function runtimeGlobals(): Promise<Result> {
 
 export async function runAll(): Promise<Result[]> {
   const out: Result[] = [];
-  for (const scenario of [jsToJs, jsToSwift, swiftToJs, sharedPull, closedAcross, runtimeGlobals]) {
+  for (const scenario of [jsToJs, jsToSwift, swiftToJs, sharedPull, closedAcross, structAcross, runtimeGlobals]) {
     try {
       out.push(await scenario());
     } catch (e) {

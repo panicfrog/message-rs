@@ -638,8 +638,8 @@ fabric.properties
 .claude/
 
 # ---- message-rs hub ----
-# The xcframework is a build product of hub/swift/scripts/build-xcframework.sh
-hub/swift/Artifacts/
+# The xcframework is a build product of hub/apple/scripts/build-xcframework.sh
+hub/apple/Artifacts/
 
 # ---- example/ demo app ----
 example/node_modules/

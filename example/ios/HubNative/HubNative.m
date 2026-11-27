@@ -25,4 +25,9 @@ RCT_EXTERN_METHOD(pullFromNative
                   : (RCTPromiseResolveBlock)resolver rejecter
                   : (RCTPromiseRejectBlock)rejecter)
 
+RCT_EXTERN_METHOD(publishProfileFromNative
+                  : (NSNumber *)id resolver
+                  : (RCTPromiseResolveBlock)resolver rejecter
+                  : (RCTPromiseRejectBlock)rejecter)
+
 @end

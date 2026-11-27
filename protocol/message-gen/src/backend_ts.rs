@@ -19,7 +19,7 @@ pub fn generate_ts(set: &SchemaSet) -> String {
     );
     let _ = writeln!(
         out,
-        "import {{\n  readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,\n  readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,\n  findExtBlock, findExtBlockIn, ScalarListView, StringListView, BytesListView, SlotListView,\n  StructListView, StructEvoListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion,\n  vRegionShape, vExtent, vInstance, vEnum, ValidationError, type ValidationPath,\n  INSTANCE_HV, SHAPE_BIT, LEN_MASK,\n}} from './runtime.js';\n"
+        "import {{\n  readBool, readF32, readF64, readI16, readI32, readI64, readI8, readU16,\n  readU32, readU64, readU64Big, readU8, readBitmapBit, readSlot, utf8, slotBytes,\n  findExtBlock, findExtBlockIn, ScalarListView, StringListView, BytesListView, SlotListView,\n  StructListView, StructEvoListView, Writer, enumNum, utf8Encode, vStr, vSlot, vRegion,\n  vRegionShape, vExtent, vInstance, vEnum, ValidationError, type ValidationPath, type MessageCodec,\n  INSTANCE_HV, SHAPE_BIT, LEN_MASK,\n}} from './runtime';\n"
     );
 
     for e in &set.enums {
@@ -382,6 +382,7 @@ fn write_message(out: &mut String, m: &MessageDescriptor, set: &SchemaSet) {
     }
     let _ = writeln!(out, "export interface {name} {{\n{}}}\n", iface_fields);
     let _ = writeln!(out, "export namespace {name} {{");
+    let _ = writeln!(out, "  export const codec: MessageCodec<{name}> = {{ key: {key}, encode, fromBytes }};", key = m.key);
     let _ = writeln!(
         out,
         "  export function decode(buf: Uint8Array): {name}Reader | null {{

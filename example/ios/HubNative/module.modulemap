@@ -1,6 +1,6 @@
 // Exposes the cxxbridge header under the module name the wrapper sources import. The Rust
 // symbols themselves come from the app's superlib (see the podspec).
 module MessageHubCxx {
-  header "../../../hub/swift/Sources/MessageHubCxx/include/message_hub.h"
+  header "../../../hub/apple/Sources/MessageHubCxx/include/message_hub.h"
   export *
 }

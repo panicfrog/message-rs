@@ -1,0 +1,1 @@
+../../../../../../runtime/kotlin/message-fixtures/src/main/kotlin/message/rs/Schema.kt

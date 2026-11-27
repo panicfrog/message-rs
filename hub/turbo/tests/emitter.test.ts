@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { Profile } from '@message/runtime/src/schema';
 
 // The generated accessor bootstraps through react-native's TurboModuleRegistry; in tests the
 // native module is a fake modelling the Rust core's semantics. This pins the user-facing
@@ -177,5 +178,32 @@ describe('generics are a compile-time hint only', () => {
     hub.publish(31, 'a string, not a bool');
     expect(seen[0].kind).toBe(hub.ValueKind.STRING);
     expect(seen[0].value).toBe('a string, not a bool');
+  });
+});
+
+describe('generated structs go through the same protocol as basic types', () => {
+  // The whole point of the unified protocol: a real generated struct's own MessageCodec
+  // (Profile.codec) is all publish/pull/channel need — no manual encode/fromBytes at the call site.
+  const profile: Profile = { age: 30, bio: 'hello', nickname: 'yamada', verified: true };
+
+  it('publishes and pulls a generated struct without manual encoding', () => {
+    hub.publish(40, profile, Profile.codec);
+    expect(hub.pullRaw(40)!.kind).toBe(hub.ValueKind.MESSAGE);
+    expect(hub.pull(40, Profile.codec)).toEqual(profile);
+    // the bytes on the wire are exactly what the schema's own encoder produces
+    expect(Array.from(hub.pullRaw(40)!.bytes)).toEqual(Array.from(Profile.encode(profile)));
+  });
+
+  it('pull of the wrong type is null, not a trap', () => {
+    hub.publish(41, 'not a Profile');
+    expect(hub.pull(41, Profile.codec)).toBeNull();
+  });
+
+  it('channel decodes every event through the codec', () => {
+    const seen: (Profile | null)[] = [];
+    const off = hub.channel(42, Profile.codec, (e) => seen.push(e.value));
+    hub.publish(42, profile, Profile.codec);
+    off();
+    expect(seen).toEqual([profile]);
   });
 });

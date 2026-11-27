@@ -2,6 +2,8 @@
 
 package message.rs.hub
 
+import message.rs.MessageCodecCompanion
+import message.rs.MessageEncodable
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -107,8 +109,9 @@ class Hub private constructor(
 
     /**
      * Publishes a value to [id]; the wire kind follows from the Kotlin type, so callers never
-     * name a [ValueKind]: `publish(1, 65535.toUShort())`, `publish(2, "hi")`. Use
-     * [MessageBytes] for a message-rs encoding.
+     * name a [ValueKind]: `publish(1, 65535.toUShort())`, `publish(2, "hi")`. Any
+     * [MessageEncodable] type works the same way: `publish(3, user)` — no manual encode step.
+     * Use [MessageBytes] only for a payload without a schema on hand.
      *
      * Publisher handles are managed per (id, kind): publishing a different kind to the same id
      * closes the previous publisher first (a publisher is a source of exactly one type).
@@ -137,6 +140,18 @@ class Hub private constructor(
         val pulled = get(id) ?: return null
         val kind = pulled.kind ?: return null
         return runCatching { Value.decode(kind, pulled.bytes) }.getOrNull()
+    }
+
+    /**
+     * The newest value of [id] as `T`, a generated struct (or any [MessageEncodable] type):
+     * `hub.pull(1, User.Companion)`. Pass the type's companion — it already implements
+     * [MessageCodecCompanion], so no registration or wiring is needed. Null when
+     * nothing is published, the last publisher closed, or the payload does not decode as `T`
+     * (e.g. another kind was published to this id) — never a trap.
+     */
+    fun <T : MessageEncodable> pull(id: Long, codec: MessageCodecCompanion<T>): T? {
+        val pulled = get(id) ?: return null
+        return codec.fromBytes(pulled.bytes)
     }
 
     /** Publishes one `(id, kind)`; a source of exactly one type. */

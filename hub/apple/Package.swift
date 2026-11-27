@@ -18,7 +18,9 @@ let superlib = ProcessInfo.processInfo.environment["MESSAGE_HUB_SUPERLIB"] == "1
 var targets: [Target] = [
     .target(name: "MessageHubCxx", publicHeadersPath: "include"),
 ]
-var hubDeps: [Target.Dependency] = ["MessageHubCxx"]
+// MessageCodec lives in the runtime, not here: the hub only moves bytes, conforming a type to
+// that one protocol is what makes it publishable (see Typed.swift). Pure Swift, no Rust symbols.
+var hubDeps: [Target.Dependency] = ["MessageHubCxx", .product(name: "MessageRuntime", package: "swift")]
 var products: [Product] = []
 
 if superlib {
@@ -45,7 +47,7 @@ if superlib {
     targets.append(
         .testTarget(
             name: "MessageHubTests",
-            dependencies: ["MessageHub"],
+            dependencies: ["MessageHub", .product(name: "MessageFixtures", package: "swift")],
             swiftSettings: [.interoperabilityMode(.Cxx)]
         )
     )
@@ -56,6 +58,7 @@ let package = Package(
     name: "MessageHub",
     platforms: [.macOS(.v13), .iOS(.v13)],
     products: products,
+    dependencies: [.package(path: "../../runtime/swift")],
     targets: targets,
     cxxLanguageStandard: .cxx17
 )

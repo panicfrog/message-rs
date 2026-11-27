@@ -40,14 +40,15 @@ fn fixture_set() -> SchemaSet {
 #[test]
 fn everything_is_generated_and_no_ir_is_shipped() {
     let swift = message_gen::generate_swift(&fixture_set());
-    assert!(swift.contains("import Foundation\nimport MessageRuntime"), "{swift}");
+    assert!(swift.contains("import Foundation\n#if canImport(MessageRuntime)\nimport MessageRuntime\n#endif"), "{swift}");
     assert!(swift.contains("public struct LegacyReader: MessageReader {"));
-    assert!(swift.contains("public struct Legacy: Equatable {"));
+    assert!(swift.contains("public struct Legacy: Equatable, MessageCodec {"));
     assert!(swift.contains("func __writeLegacyBase(_ w: inout Writer, _ base: Int, _ value: Legacy) {"));
     assert!(swift.contains("func __validateLegacyBase(_ m: RawMessage, _ base: Int, _ hv: UInt8) throws {"));
     assert!(swift.contains("public func encode() -> Data {"));
     assert!(swift.contains("public static func validate(_ data: Data) -> ValidationError? {"));
     assert!(swift.contains("public static func fromBytes(_ data: Data) -> Legacy? {"));
+    assert!(swift.contains("public static var messageKey: UInt32 { LegacyReader.KEY }"));
     assert!(!swift.contains("SchemaIr") && !swift.contains("MESSAGE_SCHEMA"));
 }
 

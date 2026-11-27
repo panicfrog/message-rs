@@ -7,6 +7,7 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import message.rs.Profile
 import message.rs.hub.Hub
 import message.rs.hub.Publisher
 import message.rs.hub.Subscription
@@ -91,6 +92,20 @@ class HubNativeModule(private val reactContext: ReactApplicationContext) :
             putArray("bytes", Arguments.createArray().apply {
                 pulled.bytes.forEach { pushInt(it.toInt() and 0xFF) }
             })
+        })
+    }
+
+    /**
+     * Publishes a real generated data class (`Profile`) through the unified protocol — no
+     * manual encode step, exactly like `publish(1, 1.toUShort())`. Reports the raw bytes back so
+     * JS can decode them with its own `Profile.codec` and check both ends agree (scenarios.ts).
+     */
+    @ReactMethod
+    fun publishProfileFromNative(id: Double, promise: Promise) {
+        val profile = Profile(age = 30u, bio = "hello", nickname = "yamada", verified = true)
+        Hub.shared.publish(id.toLong(), profile)
+        promise.resolve(Arguments.createArray().apply {
+            profile.encode().forEach { pushInt(it.toInt() and 0xFF) }
         })
     }
 

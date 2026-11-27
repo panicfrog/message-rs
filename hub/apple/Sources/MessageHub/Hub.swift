@@ -1,6 +1,9 @@
 import Dispatch
 import Foundation
 import MessageHubCxx
+#if canImport(MessageRuntime)
+import MessageRuntime
+#endif
 
 /// A Swift closure callable from Rust, with the context pair the bridge hands back.
 /// The box is retained from the moment it is registered; the bridge frees it through
@@ -174,21 +177,32 @@ extension Hub {
 
     /// Publishes a value to `id`; the wire kind follows from the Swift type, so callers never
     /// name a `ValueKind`: `publish(id: 1, UInt16(65535))`, `publish(id: 2, "hi")`.
-    /// Use `MessageBytes(payload)` for a message-rs encoding.
     ///
     /// Publisher handles are managed per (id, kind): publishing a different kind to the same id
     /// closes the previous publisher first (a publisher is a source of exactly one type).
-    public func publish(id: UInt32, _ value: some HubValue) {
-        let v = value.hubValue
-        let key = HandleKey(id: id, kind: v.kind)
+    public func publish<T: HubValue>(id: UInt32, _ value: T) {
+        publishEncoded(id: id, kind: T.hubKind, bytes: Array(value.encode()))
+    }
+
+    /// Same call shape for any `MessageCodec` type — generated structs included:
+    /// `publish(id: 3, user)`, no manual encode step. A separate overload (not one protocol both
+    /// conform to) because Swift cannot declare a blanket conformance to `HubValue` for a
+    /// protocol from another module; `encode()` already has the exact signature `HubValue` asks
+    /// for, so there is nothing to adapt here beyond picking the `.message` kind.
+    public func publish<T: MessageCodec>(id: UInt32, _ value: T) {
+        publishEncoded(id: id, kind: .message, bytes: Array(value.encode()))
+    }
+
+    private func publishEncoded(id: UInt32, kind: ValueKind, bytes: [UInt8]) {
+        let key = HandleKey(id: id, kind: kind)
         if handles[key] == nil {
-            for (k, p) in handles where k.id == id && k.kind != v.kind {
+            for (k, p) in handles where k.id == id && k.kind != kind {
                 p.close()
                 handles.removeValue(forKey: k)
             }
-            handles[key] = Publisher(hub: self, id: id, kind: v.kind)
+            handles[key] = Publisher(hub: self, id: id, kind: kind)
         }
-        handles[key]?.publish(v.encode())
+        handles[key]?.publish(bytes)
     }
 
     /// Ends publishing to `id`: subscribers get Closed once and pull goes empty. Idempotent.
@@ -204,6 +218,22 @@ extension Hub {
     public func pull(id: UInt32) -> Value? {
         guard let (kind, bytes) = get(id: id) else { return nil }
         return try? Value.decode(kind, bytes)
+    }
+
+    /// The newest value of `id` as `T`, a basic type: `let n: UInt16? = hub.pull(id: 1)`. Nil
+    /// when nothing is published, the last publisher closed, or the payload does not decode as
+    /// `T` (e.g. another kind was published to this id) — never a trap.
+    public func pull<T: HubValue>(id: UInt32) -> T? {
+        guard let (_, bytes) = get(id: id) else { return nil }
+        return T.fromBytes(Data(bytes))
+    }
+
+    /// Same call shape for any `MessageCodec` type — generated structs included:
+    /// `let user: User? = hub.pull(id: 1)`. See `publish(id:_:)`'s `MessageCodec` overload for
+    /// why this is a second overload rather than one shared protocol conformance.
+    public func pull<T: MessageCodec>(id: UInt32) -> T? {
+        guard let (_, bytes) = get(id: id) else { return nil }
+        return T.fromBytes(Data(bytes))
     }
 
     /// The newest value of `id`: `(kind, bytes)`, or nil when nothing is published (or the last

@@ -315,6 +315,23 @@ interface MessageReader {
     val hv: Int
 }
 
+/**
+ * The one contract every encodable value conforms to — generated data classes and hand-written
+ * types alike. [encode] is exactly the method generated code already has; [MessageCodecCompanion]
+ * carries the decode side, since Kotlin keeps `fromBytes` on the companion (same split as
+ * [MessageEnumCompanion]). Conforming a new type is implementing these members, nothing else
+ * needs to know about it.
+ */
+interface MessageEncodable {
+    fun encode(): ByteArray
+}
+
+/** Implemented by the companion of every [MessageEncodable] type: its key and decoder. */
+interface MessageCodecCompanion<T : MessageEncodable> {
+    val messageKey: UInt
+    fun fromBytes(bytes: ByteArray): T?
+}
+
 // ---- Lazy views ----
 
 fun checkIndex(i: Int, size: Int) {

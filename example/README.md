@@ -1,7 +1,7 @@
 # message-rs demo app
 
 A React Native app that proves the data hub's central claim: **JS, Swift and Kotlin share one
-Rust registry per process**. Five scenarios run on launch and render their verdicts; screenshots
+Rust registry per process**. Six scenarios run on launch and render their verdicts; screenshots
 of both platforms passing are in `docs/`.
 
 | Scenario | What it proves |
@@ -11,6 +11,7 @@ of both platforms passing are in `docs/`.
 | native → JS | the native side publishes, the JS channel receives |
 | shared pull | both ends read one store (identical bytes) |
 | Closed across | the last native publisher closes; JS sees Closed exactly once, pull goes empty |
+| struct across | native publishes a real generated struct (`Profile`) through the unified protocol — no manual encode step — and JS decodes it with its own `Profile.codec`, fields matching |
 
 `native` is Swift on iOS (`ios/HubNative`) and Kotlin on Android
 (`android/app/src/main/java/com/messagersdemo/hub`). Both link the **same** core the Rust turbo
@@ -48,7 +49,12 @@ The app also prints one machine-readable line: `HUB_DEMO_RESULT <passed>/<total>
 ## Notes
 
 - `hub-turbo` is a `file:` symlink into `../hub/turbo`; `metro.config.js` watches the repo root
-  so Metro can resolve it.
-- The wrapper sources are symlinked from `hub/swift` and `hub/kotlin` — one source of truth.
+  so Metro can resolve it. `@message/runtime` (the generated `Profile.codec` used by "struct
+  across") is a `file:` dependency the same way.
+- The wrapper sources are symlinked from `hub/apple` and `hub/kotlin` — one source of truth.
+  Since both surfaces now depend on their runtime's codec protocol (`MessageCodec` /
+  `MessageEncodable`), `runtime/swift`'s `Runtime.swift` + `Schema.swift` and `runtime/kotlin`'s
+  `Runtime.kt` + `Schema.kt` are symlinked in too, compiled directly into the pod/app target
+  (no separate module — `#if canImport(MessageRuntime)` guards the import for this flat build).
 - Neither surface ships its own Rust library here: the symbols come from the app's superlib
   (`librust_app.a` on iOS, linked into `librustturbo.so` on Android).

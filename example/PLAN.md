@@ -1,10 +1,12 @@
 # example/: the message-rs demo app — implementation plan
 
-**Both platforms pass (2026-11-26)** — `docs/ios-all-pass.png`, `docs/android-all-pass.png`.
-Five scenarios run on launch: JS→JS, JS→native, native→JS, shared pull (both ends read one
-store), Closed across languages (exactly once, pull empty afterwards). `native` is Swift on iOS
-and Kotlin on Android. One Rust registry per process, verified at runtime on both.
-See README.md for how to run it.
+**Both platforms pass (2026-11-27, re-verified after the unified encoding protocol landed)** —
+`docs/ios-all-pass.png`, `docs/android-all-pass.png`. Six scenarios run on launch: JS→JS,
+JS→native, native→JS, shared pull (both ends read one store), Closed across languages (exactly
+once, pull empty afterwards), and **struct across** (native publishes a real generated `Profile`
+through the unified protocol with no manual encode step; JS decodes it with `Profile.codec` and
+every field matches — see hub/DESIGN.md §6b). `native` is Swift on iOS and Kotlin on Android. One
+Rust registry per process, verified at runtime on both. See README.md for how to run it.
 
 Scope (settled with the user): a React Native app inside this repository that verifies **all
 three surfaces share one Rust registry**. Steps 0–3 are done on both platforms; what remains is
@@ -169,6 +171,32 @@ drive "native publishes → JS receives" and "JS publishes → native receives" 
    against the committed vector (byte equality first, then field values).
 
 Each scenario asserts on bytes, not just "an event arrived".
+
+## Unified protocol findings (2026-11-27)
+
+Wiring `publish(id:, profile)` / `publish(id, profile)` into the demo's native modules (no manual
+encode step) surfaced four things beyond the protocol design itself (hub/DESIGN.md §6b):
+
+- **The pod/app compiles every wrapper source as one flat module**, not separate SwiftPM/Kotlin
+  modules — so `import MessageRuntime` (a real module in the standalone packages) does not exist
+  here. Fixed with `#if canImport(MessageRuntime)` around the import in `Typed.swift`/`Hub.swift`
+  and in the generator's `Schema.swift` header: true when built as a package, skipped when the
+  file is compiled directly alongside `Runtime.swift` in the pod. Kotlin needs no such guard —
+  same-package types resolve without an import either way.
+- **iOS native methods need a second registration**: `@objc(...)` on the Swift method is not
+  enough; `RCT_EXTERN_METHOD` in `HubNative.m` must list it too, or JS sees `undefined is not a
+  function`. Android's `@ReactMethod` annotation alone is sufficient (reflection-based).
+- **Metro does not resolve a `.js` extension pointing at a `.ts` file**: the generated
+  `schema.ts`'s `from './runtime.js'` (correct for NodeNext/tsc) fails under Metro with "None of
+  these files exist" — it tries `runtime.js`, `runtime.js.ts`, etc., never plain `runtime.ts`.
+  Fixed by dropping the extension in the generator's emitted import (`from './runtime'`), which
+  resolves correctly under both tsc's `bundler` resolution and Metro.
+- **Writing the Android `debug_http_host` preference via an adb heredoc silently produced an
+  empty file** (`sh: can't create temporary file ...: Permission denied` — the device shell's
+  heredoc temp file location isn't writable by `run-as`). Piping the content from the host
+  instead (`printf ... | adb shell "run-as ... sh -c 'cat > ...'"`) writes it correctly. Without
+  this the app fell back to port 8081 and loaded another project's Metro bundle ("MessageRsDemo
+  has not been registered").
 
 ## Steps
 
